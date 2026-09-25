@@ -1,0 +1,334 @@
+{
+  "format": "glowframes",
+  "version": 1,
+  "name": "Detector support",
+  "units": "mm",
+  "presets": [
+    200,
+    300,
+    380
+  ],
+  "parts": [
+    {
+      "id": "559a3538-be19-45b4-88fd-b6c105f212c4",
+      "label": "F01",
+      "kind": "rail",
+      "length": 600,
+      "axis": "x",
+      "p": [
+        0,
+        10,
+        -190
+      ]
+    },
+    {
+      "id": "e52bc889-7964-44a6-b2e6-411946f12503",
+      "label": "F02",
+      "kind": "rail",
+      "length": 600,
+      "axis": "x",
+      "p": [
+        0,
+        10,
+        190
+      ]
+    },
+    {
+      "id": "a358354b-e3d8-4239-96ed-53814ea7833e",
+      "label": "F03",
+      "kind": "rail",
+      "length": 360,
+      "axis": "z",
+      "p": [
+        -290,
+        10,
+        0
+      ]
+    },
+    {
+      "id": "d29a372a-c84a-43c3-b29a-caf0c7cee3ca",
+      "label": "F04",
+      "kind": "rail",
+      "length": 360,
+      "axis": "z",
+      "p": [
+        290,
+        10,
+        0
+      ]
+    },
+    {
+      "id": "e83b4673-c86e-4ff1-b387-c9aca4ca1b0f",
+      "label": "F05",
+      "kind": "rail",
+      "length": 400,
+      "axis": "y",
+      "p": [
+        -290,
+        220,
+        -190
+      ]
+    },
+    {
+      "id": "730c08ee-93ec-4bab-b4ed-d2dbf24e0918",
+      "label": "F06",
+      "kind": "rail",
+      "length": 400,
+      "axis": "y",
+      "p": [
+        -290,
+        220,
+        190
+      ]
+    },
+    {
+      "id": "721a8ca2-21c3-4fcb-bed3-6d0da143adf3",
+      "label": "F07",
+      "kind": "rail",
+      "length": 400,
+      "axis": "y",
+      "p": [
+        290,
+        220,
+        -190
+      ]
+    },
+    {
+      "id": "9805faf5-977b-4845-869b-56f44c40129c",
+      "label": "F08",
+      "kind": "rail",
+      "length": 400,
+      "axis": "y",
+      "p": [
+        290,
+        220,
+        190
+      ]
+    },
+    {
+      "id": "3ba0193d-0f9a-4ab0-a7a0-856e7d5f7aa6",
+      "label": "F09",
+      "kind": "rail",
+      "length": 560,
+      "axis": "x",
+      "p": [
+        0,
+        300,
+        -190
+      ]
+    },
+    {
+      "id": "75ca9184-9994-4658-b88d-5681400d7290",
+      "label": "F10",
+      "kind": "rail",
+      "length": 560,
+      "axis": "x",
+      "p": [
+        0,
+        300,
+        190
+      ]
+    },
+    {
+      "id": "cb0dc275-6a38-4d80-8cfe-2912cf330b6c",
+      "label": "F11",
+      "kind": "rail",
+      "length": 360,
+      "axis": "z",
+      "p": [
+        -120,
+        300,
+        0
+      ]
+    },
+    {
+      "id": "24180335-fc86-487b-8998-cb34a945c976",
+      "label": "F12",
+      "kind": "rail",
+      "length": 360,
+      "axis": "z",
+      "p": [
+        120,
+        300,
+        0
+      ]
+    },
+    {
+      "kind": "bracket",
+      "id": "f0c667f8-e502-4aeb-93de-037a23d9463b",
+      "label": "B01",
+      "a": "559a3538-be19-45b4-88fd-b6c105f212c4",
+      "face": "y",
+      "sign": 1,
+      "sa": 1,
+      "offset": -280,
+      "b": "e83b4673-c86e-4ff1-b387-c9aca4ca1b0f"
+    },
+    {
+      "kind": "bracket",
+      "id": "c42a1793-7d88-4020-b58d-db85eb4ad735",
+      "label": "B02",
+      "a": "559a3538-be19-45b4-88fd-b6c105f212c4",
+      "face": "y",
+      "sign": 1,
+      "sa": -1,
+      "offset": 280,
+      "b": "721a8ca2-21c3-4fcb-bed3-6d0da143adf3"
+    },
+    {
+      "kind": "bracket",
+      "id": "4753b1d6-0a1c-4e33-8858-039a9e22393c",
+      "label": "B03",
+      "a": "559a3538-be19-45b4-88fd-b6c105f212c4",
+      "face": "z",
+      "sign": 1,
+      "sa": 1,
+      "offset": -280,
+      "b": "a358354b-e3d8-4239-96ed-53814ea7833e"
+    },
+    {
+      "kind": "bracket",
+      "id": "71c9918d-1d78-402c-a51a-ffe77ae98945",
+      "label": "B04",
+      "a": "559a3538-be19-45b4-88fd-b6c105f212c4",
+      "face": "z",
+      "sign": 1,
+      "sa": -1,
+      "offset": 280,
+      "b": "d29a372a-c84a-43c3-b29a-caf0c7cee3ca"
+    },
+    {
+      "kind": "bracket",
+      "id": "9b6bbe4f-565f-4a15-aca0-a0deadf7d878",
+      "label": "B05",
+      "a": "e52bc889-7964-44a6-b2e6-411946f12503",
+      "face": "y",
+      "sign": 1,
+      "sa": 1,
+      "offset": -280,
+      "b": "730c08ee-93ec-4bab-b4ed-d2dbf24e0918"
+    },
+    {
+      "kind": "bracket",
+      "id": "240b9880-d157-4a24-9d9f-4fbfc8ecbf07",
+      "label": "B06",
+      "a": "e52bc889-7964-44a6-b2e6-411946f12503",
+      "face": "y",
+      "sign": 1,
+      "sa": -1,
+      "offset": 280,
+      "b": "9805faf5-977b-4845-869b-56f44c40129c"
+    },
+    {
+      "kind": "bracket",
+      "id": "067277f3-6354-4a78-97e6-9a3f8a730008",
+      "label": "B07",
+      "a": "e52bc889-7964-44a6-b2e6-411946f12503",
+      "face": "z",
+      "sign": -1,
+      "sa": 1,
+      "offset": -280,
+      "b": "a358354b-e3d8-4239-96ed-53814ea7833e"
+    },
+    {
+      "kind": "bracket",
+      "id": "86452a91-c91b-4b01-a170-89c2423f6be3",
+      "label": "B08",
+      "a": "e52bc889-7964-44a6-b2e6-411946f12503",
+      "face": "z",
+      "sign": -1,
+      "sa": -1,
+      "offset": 280,
+      "b": "d29a372a-c84a-43c3-b29a-caf0c7cee3ca"
+    },
+    {
+      "kind": "bracket",
+      "id": "533d93ff-532a-4271-8fce-a58a6ee95ca5",
+      "label": "B09",
+      "a": "e83b4673-c86e-4ff1-b387-c9aca4ca1b0f",
+      "face": "x",
+      "sign": 1,
+      "sa": 1,
+      "offset": 90,
+      "b": "3ba0193d-0f9a-4ab0-a7a0-856e7d5f7aa6"
+    },
+    {
+      "kind": "bracket",
+      "id": "e52b5d9a-4a79-489c-9c67-fab74be2fcf8",
+      "label": "B10",
+      "a": "730c08ee-93ec-4bab-b4ed-d2dbf24e0918",
+      "face": "x",
+      "sign": 1,
+      "sa": 1,
+      "offset": 90,
+      "b": "75ca9184-9994-4658-b88d-5681400d7290"
+    },
+    {
+      "kind": "bracket",
+      "id": "462500cc-d059-4a8a-8850-5594787a7296",
+      "label": "B11",
+      "a": "721a8ca2-21c3-4fcb-bed3-6d0da143adf3",
+      "face": "x",
+      "sign": -1,
+      "sa": 1,
+      "offset": 90,
+      "b": "3ba0193d-0f9a-4ab0-a7a0-856e7d5f7aa6"
+    },
+    {
+      "kind": "bracket",
+      "id": "c97999e0-04cd-494a-8cb3-5901f3fdd519",
+      "label": "B12",
+      "a": "9805faf5-977b-4845-869b-56f44c40129c",
+      "face": "x",
+      "sign": -1,
+      "sa": 1,
+      "offset": 90,
+      "b": "75ca9184-9994-4658-b88d-5681400d7290"
+    },
+    {
+      "kind": "bracket",
+      "id": "70abb747-bb06-495a-8d21-9d4e06c8e542",
+      "label": "B13",
+      "a": "3ba0193d-0f9a-4ab0-a7a0-856e7d5f7aa6",
+      "face": "z",
+      "sign": 1,
+      "sa": 1,
+      "offset": -110,
+      "b": "cb0dc275-6a38-4d80-8cfe-2912cf330b6c"
+    },
+    {
+      "kind": "bracket",
+      "id": "b083887d-1f08-4c7a-894d-5c46f801eba4",
+      "label": "B14",
+      "a": "3ba0193d-0f9a-4ab0-a7a0-856e7d5f7aa6",
+      "face": "z",
+      "sign": 1,
+      "sa": 1,
+      "offset": 130,
+      "b": "24180335-fc86-487b-8998-cb34a945c976"
+    },
+    {
+      "kind": "bracket",
+      "id": "4444554f-8005-43a5-a538-5b143cae5a67",
+      "label": "B15",
+      "a": "75ca9184-9994-4658-b88d-5681400d7290",
+      "face": "z",
+      "sign": -1,
+      "sa": 1,
+      "offset": -110,
+      "b": "cb0dc275-6a38-4d80-8cfe-2912cf330b6c"
+    },
+    {
+      "kind": "bracket",
+      "id": "da7db920-e85e-4c86-92c4-500a45b4bfde",
+      "label": "B16",
+      "a": "75ca9184-9994-4658-b88d-5681400d7290",
+      "face": "z",
+      "sign": -1,
+      "sa": 1,
+      "offset": 130,
+      "b": "24180335-fc86-487b-8998-cb34a945c976"
+    }
+  ],
+  "fastenersPerSide": 1
+}

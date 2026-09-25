@@ -1,0 +1,28 @@
+{
+  "name": "glowframes",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --open",
+    "build": "tsc -p . && vite build",
+    "release": "npm run build && node -e \"require('fs').copyFileSync('dist/index.html','../index.html')\"",
+    "preview": "vite preview --host 127.0.0.1 --open",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/three": "^0.180.0",
+    "prettier": "^3.9.9",
+    "typescript": "~5.9.2",
+    "vite": "^7.1.7",
+    "vite-plugin-singlefile": "^2.3.3"
+  }
+}
