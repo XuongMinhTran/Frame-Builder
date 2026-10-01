@@ -1,5 +1,13 @@
 import * as T from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { STLExporter } from "three/addons/exporters/STLExporter.js";
+import { ViewCube } from "./viewCube";
+import { referenceView } from "./referenceView";
+import { referenceBounds } from "./references";
+import type { ReferenceObject } from "./references";
+import type { BuildStep } from "./assembly";
+import { describeRail } from "./assembly";
+import { BenchScene } from "./benchScene";
 import { flightKeys, flightOffset, rotateCameraInPlace } from "./navigation";
 import { createRailGeometry, createBracketGeometry } from "./geometry";
 import {
@@ -50,6 +58,11 @@ export type ViewConfig = {
   grid: boolean;
   tool: "select" | "measure";
   moveAxis: Axis | "plane";
+  navigation: "drone" | "orbit";
+  reference: string | null;
+  guide: BuildStep | null;
+  guidePlaying: boolean;
+  guideReplay: number;
 };
 export type ViewCallbacks = {
   select: (ids: string[]) => void;
@@ -57,7 +70,11 @@ export type ViewCallbacks = {
   message: (s: string) => void;
   placed: () => void;
   measure: (n: number | null) => void;
-  navigating: () => void;
+  navigating: (
+    view?:
+      "perspective" | "top" | "front" | "right" | "back" | "left" | "bottom",
+  ) => void;
+  selectReference: (id: string | null) => void;
 };
 function gradientBackground() {
   const c = document.createElement("canvas");
@@ -115,6 +132,9 @@ export class Viewport {
   camera: T.OrthographicCamera | T.PerspectiveCamera;
   controls: OrbitControls;
   world = new T.Group();
+  private guideRoot = new T.Group();
+  private bench: BenchScene;
+  references = new T.Group();
   ghost = new T.Group();
   helpers = new T.Group();
   gridGroup = new T.Group();
@@ -126,6 +146,16 @@ export class Viewport {
   private cache = new Map<number, T.BufferGeometry>();
   private edgeCache = new Map<number, T.BufferGeometry>();
   private host: HTMLElement;
+  private cube: ViewCube;
+  private referenceDrag: {
+    id: string;
+    base: Project;
+    preview: Project;
+    start: T.Vector3;
+    plane: T.Plane;
+    direction?: T.Vector3;
+    extend: boolean;
+  } | null = null;
   private overlay: HTMLDivElement;
   private labels: { el: HTMLElement; p: T.Vector3 }[] = [];
   private drag: Drag | null = null;
@@ -139,7 +169,14 @@ export class Viewport {
   private lastPointer: PointerEvent | null = null;
   private scale = 680;
   private triadScene = new T.Scene();
-  private triadCamera = new T.OrthographicCamera(-1.55, 1.55, 1.55, -1.55, 0.1, 10);
+  private triadCamera = new T.OrthographicCamera(
+    -1.55,
+    1.55,
+    1.55,
+    -1.55,
+    0.1,
+    10,
+  );
   private keys = new Set<string>();
   private fastFlight = false;
   private hovering = false;
@@ -226,6 +263,14 @@ export class Viewport {
       RIGHT: T.MOUSE.PAN,
     };
     this.controls.update();
+    this.controls.addEventListener("start", () => {
+      if (this.cfg.navigation === "orbit") this.cb.navigating();
+    });
+    this.cube = new ViewCube(
+      host,
+      (dx, dy) => this.orbit(dx, dy),
+      (direction) => this.orient(direction),
+    );
     this.scene.add(new T.HemisphereLight(0xe9f3ff, 0x41434b, 2));
     const light = new T.DirectionalLight(0xfff5e6, 3);
     light.position.set(400, 900, 600);
@@ -252,10 +297,11 @@ export class Viewport {
       );
       this.gridGroup.add(line);
     }
+    this.guideRoot.add(this.world, this.helpers);
     this.scene.add(
-      this.world,
+      this.guideRoot,
+      this.references,
       this.ghost,
-      this.helpers,
       this.gridGroup,
       this.gizmo,
       this.measurement,
@@ -274,6 +320,7 @@ export class Viewport {
     this.overlay = document.createElement("div");
     this.overlay.className = "scene-labels";
     host.append(this.overlay);
+    this.bench = new BenchScene(this.guideRoot, this.world, this.scene, host);
     this.box = document.createElement("div");
     this.box.className = "selection-box";
     this.box.hidden = true;
@@ -323,15 +370,24 @@ export class Viewport {
   private animate = () => {
     this.frame = requestAnimationFrame(this.animate);
     const now = performance.now();
+    this.bench.update(
+      (now - this.previousTime) / 1000,
+      this.cfg.guidePlaying && !document.hidden,
+    );
     this.moveCamera((now - this.previousTime) / 1000);
     this.previousTime = now;
     if (!this.looking) this.controls.update();
     this.renderer.render(this.scene, this.camera);
     const w = this.host.clientWidth,
       h = this.host.clientHeight;
+    this.bench.renderInset(this.renderer, this.scene, w, h);
     this.renderTriad(h);
+    this.cube.render(this.renderer, this.camera, w, h);
     for (const l of this.labels) {
-      const p = l.p.clone().project(this.camera);
+      const worldPosition = this.cfg.guide
+        ? this.guideRoot.localToWorld(l.p.clone())
+        : l.p.clone();
+      const p = worldPosition.project(this.camera);
       l.el.style.transform = `translate(${((p.x + 1) * w) / 2}px,${((-p.y + 1) * h) / 2}px) translate(-50%,-50%)`;
       l.el.hidden = p.z > 1 || p.z < -1;
     }
@@ -397,6 +453,11 @@ export class Viewport {
   };
   private navigationDown = (e: KeyboardEvent) => {
     if (
+      this.cfg.navigation !== "drone" ||
+      (e.target as HTMLElement)?.closest(".view-cube")
+    )
+      return;
+    if (
       e.ctrlKey ||
       e.metaKey ||
       e.altKey ||
@@ -430,7 +491,14 @@ export class Viewport {
     this.fastFlight = e.shiftKey;
   };
   private moveCamera(seconds: number) {
-    if (!this.keys.size || this.drag || this.boxStart) return;
+    if (
+      !this.keys.size ||
+      this.drag ||
+      this.referenceDrag ||
+      this.boxStart ||
+      this.cfg.navigation !== "drone"
+    )
+      return;
     const offset = flightOffset(
       this.camera.quaternion,
       this.keys,
@@ -464,7 +532,18 @@ export class Viewport {
     this.controls.update();
     this.cb.navigating();
   }
-  update(cfg: ViewConfig) {
+  update(cfg: ViewConfig, preserveGuideState = false) {
+    const guideChanged = this.cfg.guide !== cfg.guide;
+    const sameGuideState = !guideChanged && this.cfg.project === cfg.project;
+    const replayChanged = this.cfg.guideReplay !== cfg.guideReplay;
+    const playbackOnly =
+      cfg.guide &&
+      !guideChanged &&
+      this.cfg.project === cfg.project &&
+      this.cfg.labels === cfg.labels &&
+      this.cfg.dimensions === cfg.dimensions;
+    if (this.cfg.navigation !== cfg.navigation || this.cfg.guide !== cfg.guide)
+      this.cancelOperation();
     if (
       this.review &&
       (cfg.project !== this.review.project ||
@@ -475,8 +554,25 @@ export class Viewport {
       this.resetAttachment();
     const placementChanged = cfg.placement !== this.cfg.placement;
     this.cfg = cfg;
-    this.gridGroup.visible = cfg.grid;
-    this.rebuild(cfg.project);
+    this.controls.enableRotate = cfg.navigation === "orbit";
+    this.controls.mouseButtons.MIDDLE =
+      cfg.navigation === "orbit" ? T.MOUSE.ROTATE : T.MOUSE.PAN;
+    this.controls.mouseButtons.RIGHT =
+      cfg.navigation === "orbit" ? T.MOUSE.ROTATE : T.MOUSE.PAN;
+    this.gridGroup.visible = cfg.grid && !cfg.guide;
+    if (playbackOnly) {
+      if (replayChanged) this.bench.replay();
+      return;
+    }
+    // Rebuild presentation toggles from fresh meshes without rewinding the
+    // current insertion. A different step or project starts a new motion.
+    this.rebuild(cfg.project, !sameGuideState && !preserveGuideState);
+    if (guideChanged && !preserveGuideState) {
+      if (cfg.guide) {
+        this.usePerspective();
+        this.fit();
+      } else this.fit();
+    }
     if (!cfg.placement) {
       this.clearGroup(this.ghost);
       this.candidate = null;
@@ -513,8 +609,10 @@ export class Viewport {
                 this.selectedMat,
                 this.ghostMat,
               ].includes(m as T.MeshStandardMaterial)
-            )
+            ) {
+              if ("map" in m && m.map instanceof T.Texture) m.map.dispose();
               m.dispose();
+            }
           });
         }
       });
@@ -530,7 +628,7 @@ export class Viewport {
   private meshPart(part: Part, parts: Part[], ghost = false) {
     const group = new T.Group();
     group.userData.id = part.id;
-    const selected = this.cfg.selection.includes(part.id);
+    const selected = !this.cfg.guide && this.cfg.selection.includes(part.id);
     const material = ghost
       ? this.ghostMat
       : selected
@@ -616,7 +714,7 @@ export class Viewport {
         { along: "x", slot: local(ai(host.axis)) },
       ];
       if (partner) legs.push({ along: "y", slot: local(ai(partner.axis)) });
-      for (const leg of legs) {
+      for (const [legIndex, leg] of legs.entries()) {
         const across = leg.along === "x" ? "y" : "x";
         const at = (h: number, out: number) => {
           const v = new T.Vector3();
@@ -647,6 +745,10 @@ export class Viewport {
           head.rotation.z = Math.PI / 2;
           shank.rotation.z = Math.PI / 2;
         }
+        for (const screw of [head, shank]) {
+          screw.userData.hardware = "screw";
+          screw.userData.mountRailId = legIndex ? part.b : part.a;
+        }
         group.add(head, shank, nut);
       }
     }
@@ -662,29 +764,145 @@ export class Viewport {
     this.overlay.append(el);
     this.labels.push({ el, p });
   }
-  private rebuild(project: Project) {
+  private rebuild(project: Project, resetGuide = true) {
     this.clearGroup(this.world);
+    this.clearGroup(this.references);
     this.clearGroup(this.helpers);
     this.clearGroup(this.gizmo);
     this.overlay.replaceChildren();
     this.labels = [];
     for (const part of project.parts) {
-      if (part.hidden) continue;
-      this.world.add(
-        this.meshPart(
-          part,
-          project.parts,
-          !!this.drag?.moved && this.drag.ids.includes(part.id),
-        ),
+      if (part.hidden && !this.cfg.guide) continue;
+      const mesh = this.meshPart(
+        part,
+        project.parts,
+        !!this.drag?.moved && this.drag.ids.includes(part.id),
       );
-      if (this.cfg.labels && part.kind === "rail")
+      const guide = this.cfg.guide;
+      const context = !!guide && !guide.bench.workIds.includes(part.id);
+      mesh.userData.guideContext = context;
+      if (guide && (context || !guide.active.includes(part.id))) {
+        mesh.traverse((o) => {
+          if (o instanceof T.Mesh) {
+            const materials = Array.isArray(o.material)
+              ? o.material
+              : [o.material];
+            const transparent = materials.map((m) => {
+              const copy = m.clone();
+              copy.transparent = true;
+              copy.opacity = context ? 0.18 : 0.62;
+              // Ghosts remain visible even when the current tabletop pose
+              // puts part of the final frame behind the work surface.
+              copy.depthTest = !context;
+              copy.depthWrite = false;
+              if (
+                ![
+                  this.mat,
+                  this.bracketMat,
+                  this.selectedBracketMat,
+                  this.screwMat,
+                  this.nutMat,
+                  this.selectedMat,
+                  this.ghostMat,
+                ].includes(m)
+              )
+                m.dispose();
+              return copy;
+            });
+            o.material = Array.isArray(o.material)
+              ? transparent
+              : transparent[0];
+          }
+          if (o instanceof T.LineSegments) {
+            const material = o.material as T.LineBasicMaterial;
+            material.opacity = context ? 0.25 : 0.12;
+            if (context) material.color.setHex(0xb6c9d6);
+            material.depthTest = !context;
+            material.depthWrite = false;
+          }
+        });
+      }
+      this.world.add(mesh);
+      if (guide)
+        mesh.traverse((o) => {
+          if (
+            o.userData.hardware === "screw" &&
+            !guide.fastened.includes(`${part.id}:${o.userData.mountRailId}`)
+          ) {
+            // Upcoming fasteners are ghosted too; the animated fastener's
+            // static copy is replaced by BenchScene for the current step.
+            if (!context && o instanceof T.Mesh) {
+              const materials = Array.isArray(o.material)
+                ? o.material
+                : [o.material];
+              const faded = materials.map((m) => {
+                const copy = m.clone();
+                copy.transparent = true;
+                copy.opacity = 0.12;
+                copy.depthWrite = false;
+                if (
+                  ![
+                    this.screwMat,
+                    this.mat,
+                    this.bracketMat,
+                    this.selectedBracketMat,
+                    this.nutMat,
+                    this.selectedMat,
+                    this.ghostMat,
+                  ].includes(m)
+                )
+                  m.dispose();
+                return copy;
+              });
+              o.material = Array.isArray(o.material) ? faded : faded[0];
+            }
+          }
+        });
+      if (
+        !context &&
+        (this.cfg.labels || guide?.active.includes(part.id)) &&
+        part.kind === "rail"
+      )
         this.label(
-          part.label,
+          guide ? describeRail(project, part.id) : part.label,
           v3(partPosition(part, project.parts)).add(new T.Vector3(0, 15, 0)),
         );
+      if (
+        guide?.phase === "Preload" &&
+        guide.active.includes(part.id) &&
+        part.kind === "rail"
+      ) {
+        for (const sign of [-1, 1])
+          this.label(
+            `${sign < 0 ? "Measure from here · 0" : part.length} mm`,
+            v3(part.p)
+              .addScaledVector(unit(ai(part.axis)), (sign * part.length) / 2)
+              .addScaledVector(unit(part.axis === "y" ? 0 : 1), 26),
+            "dimension-label",
+          );
+      }
     }
+    if (!this.cfg.guide)
+      for (const ref of project.references ?? []) {
+        if (ref.hidden) continue;
+        this.references.add(referenceView(ref, this.cfg.reference === ref.id));
+        if (ref.kind === "ruler")
+          this.label(
+            `${round(ref.size[0])} mm`,
+            new T.Vector3(ref.size[0] / 2, 15, -ref.size[2] / 2 - 12)
+              .applyMatrix4(
+                new T.Matrix4().makeRotationFromEuler(
+                  new T.Euler(
+                    ...(ref.rotation.map(T.MathUtils.degToRad) as Vec),
+                  ),
+                ),
+              )
+              .add(v3(ref.p)),
+            "dimension-label",
+          );
+      }
     const selected = project.parts.filter(
-      (p) => this.cfg.selection.includes(p.id) && !p.hidden,
+      (p) => !this.cfg.guide && this.cfg.selection.includes(p.id) && !p.hidden,
     );
     for (const p of selected) {
       if (p.kind === "rail") {
@@ -695,7 +913,7 @@ export class Viewport {
         this.helpers.add(new T.Box3Helper(b, 0xe1b168));
       }
     }
-    if (this.cfg.dimensions) {
+    if (this.cfg.dimensions && !this.cfg.guide) {
       const b = bounds(project.parts);
       if (b.size.some((v) => v > 0)) {
         const o = new T.Vector3(b.min[0] - 35, b.min[1], b.max[2] + 45);
@@ -718,10 +936,20 @@ export class Viewport {
       const offset = unit(i === 1 ? 0 : 1).multiplyScalar(24);
       this.dimension(a.add(offset), b.add(offset), `${p.length} mm`);
     }
-    if (selected.length && !this.cfg.placement && this.cfg.tool === "select") {
+    const reference = !this.cfg.guide
+      ? project.references?.find(
+          (r) => r.id === this.cfg.reference && !r.hidden,
+        )
+      : undefined;
+    if (
+      (selected.length || reference) &&
+      !this.cfg.placement &&
+      this.cfg.tool === "select"
+    ) {
       const center = new T.Vector3();
       selected.forEach((p) => center.add(v3(partPosition(p, project.parts))));
-      center.divideScalar(selected.length);
+      if (reference) center.fromArray(reference.p);
+      else center.divideScalar(selected.length);
       this.gizmo.position.copy(center);
       for (let i = 0; i < 3; i++) {
         const color = [0xe0716b, 0x8fc45f, 0x6fa2de][i];
@@ -750,6 +978,7 @@ export class Viewport {
         this.gizmo.add(target);
       }
     }
+    this.bench.configure(this.cfg.guide, project, resetGuide);
   }
   private dimension(a: T.Vector3, b: T.Vector3, text: string) {
     const line = new T.Line(
@@ -1096,7 +1325,9 @@ export class Viewport {
   }
   /** Orientation (0-3) of the bracket being previewed, for rotating it. */
   candidateOrient() {
-    return this.candidate?.kind === "bracket" ? orientOf(this.candidate) : undefined;
+    return this.candidate?.kind === "bracket"
+      ? orientOf(this.candidate)
+      : undefined;
   }
   /** R while dragging a placed bracket turns it 90° in place. */
   rotateDraggedBracket() {
@@ -1177,7 +1408,13 @@ export class Viewport {
     this.clearGroup(this.ghost);
   }
   private down = (e: PointerEvent) => {
-    if (e.button === 2 && !e.shiftKey && !this.drag && !this.boxStart) {
+    if (
+      this.cfg.navigation === "drone" &&
+      e.button === 2 &&
+      !e.shiftKey &&
+      !this.drag &&
+      !this.boxStart
+    ) {
       this.startLook(e);
       return;
     }
@@ -1186,6 +1423,10 @@ export class Viewport {
       return;
     }
     if (e.button !== 0) return;
+    if (this.cfg.guide) {
+      e.stopImmediatePropagation();
+      return;
+    }
     this.lastPointer = e;
     this.setRay(e);
     this.renderer.domElement.focus();
@@ -1199,7 +1440,10 @@ export class Viewport {
     if (this.cfg.tool === "measure") {
       e.stopImmediatePropagation();
       const point =
-        this.hits()[0]?.point ||
+        [
+          ...this.hits(),
+          ...this.ray.intersectObjects(this.references.children, true),
+        ].sort((a, b) => a.distance - b.distance)[0]?.point ||
         this.planePoint(new T.Plane(new T.Vector3(0, 1, 0), 0));
       if (point) {
         if (!this.measureStart) {
@@ -1221,6 +1465,71 @@ export class Viewport {
     }
     const gizmoHit = this.ray.intersectObjects(this.gizmo.children, true)[0];
     const hit = this.hits()[0];
+    const refHit = this.ray
+      .intersectObjects(this.references.children, true)
+      .find((h) => h.object instanceof T.Mesh);
+    const reference = this.cfg.project.references?.find(
+      (r) =>
+        r.id ===
+        (gizmoHit && this.cfg.reference
+          ? this.cfg.reference
+          : refHit?.object.userData.referenceId),
+    );
+    if (
+      reference &&
+      ((gizmoHit && this.cfg.reference) ||
+        (refHit &&
+          (!hit ||
+            refHit.distance < hit.distance ||
+            refHit.object.userData.extendRuler)))
+    ) {
+      e.stopImmediatePropagation();
+      this.cb.selectReference(reference.id);
+      const extend = !!refHit?.object.userData.extendRuler && !gizmoHit;
+      const axis = gizmoHit?.object.userData.axis as Axis | undefined;
+      let direction: T.Vector3 | undefined = axis
+        ? unit(ai(axis))
+        : this.cfg.moveAxis !== "plane"
+          ? unit(ai(this.cfg.moveAxis))
+          : undefined;
+      if (extend)
+        direction = new T.Vector3(1, 0, 0).applyEuler(
+          new T.Euler(...(reference.rotation.map(T.MathUtils.degToRad) as Vec)),
+        );
+      let plane = this.movePlane(
+        v3(reference.p),
+        axis ?? (this.cfg.moveAxis === "plane" ? undefined : this.cfg.moveAxis),
+      );
+      if (direction) {
+        const normal = this.camera.getWorldDirection(new T.Vector3());
+        normal.addScaledVector(direction, -normal.dot(direction));
+        if (normal.lengthSq() < 0.0001) {
+          this.cb.message(
+            "Rotate the view to drag along this axis, or use the position fields.",
+          );
+          return;
+        }
+        plane = new T.Plane().setFromNormalAndCoplanarPoint(
+          normal.normalize(),
+          refHit?.point ?? v3(reference.p),
+        );
+      }
+      const start = this.planePoint(plane);
+      if (!start) return;
+      this.referenceDrag = {
+        id: reference.id,
+        base: this.cfg.project,
+        preview: this.cfg.project,
+        start,
+        plane,
+        direction,
+        extend,
+      };
+      this.controls.enabled = false;
+      this.renderer.domElement.setPointerCapture(e.pointerId);
+      return;
+    }
+    this.cb.selectReference(null);
     if (!hit && !gizmoHit) {
       e.stopImmediatePropagation();
       this.boxStart = [e.clientX, e.clientY];
@@ -1260,9 +1569,9 @@ export class Viewport {
         ? rail(this.cfg.project.parts, p.rail)?.axis
         : p.kind === "bracket"
           ? rail(this.cfg.project.parts, p.a)?.axis
-        : this.cfg.moveAxis === "plane"
-          ? undefined
-          : this.cfg.moveAxis);
+          : this.cfg.moveAxis === "plane"
+            ? undefined
+            : this.cfg.moveAxis);
     if (!axis) {
       const allowed = axes.filter((_, i) => {
         const d: Vec = [0, 0, 0];
@@ -1295,6 +1604,37 @@ export class Viewport {
     this.renderer.domElement.setPointerCapture(e.pointerId);
   };
   private move = (e: PointerEvent) => {
+    if (this.referenceDrag) {
+      e.stopImmediatePropagation();
+      this.setRay(e);
+      const d = this.referenceDrag,
+        point = this.planePoint(d.plane);
+      if (!point) return;
+      const delta = point.sub(d.start),
+        next = clone(d.base),
+        ref = next.references!.find((r) => r.id === d.id)!;
+      if (d.direction)
+        delta.copy(d.direction.clone().multiplyScalar(delta.dot(d.direction)));
+      const increment = this.cfg.snapEnabled && !e.altKey ? this.cfg.step : 0;
+      if (d.extend)
+        ref.size[0] = Math.max(
+          10,
+          Math.min(
+            100000,
+            round(ref.size[0] + snap(delta.dot(d.direction!), increment)),
+          ),
+        );
+      else
+        ref.p = ref.p.map((n, i) =>
+          Math.max(
+            -100000,
+            Math.min(100000, round(n + snap(delta.getComponent(i), increment))),
+          ),
+        ) as Vec;
+      d.preview = next;
+      this.rebuild(next);
+      return;
+    }
     if (this.looking) {
       e.stopImmediatePropagation();
       rotateCameraInPlace(
@@ -1343,7 +1683,10 @@ export class Viewport {
         rect = this.renderer.domElement.getBoundingClientRect();
       // Screen movement per 100 mm along each axis.
       const screen = [0, 1, 2].map((i) => {
-        const b = origin.clone().addScaledVector(unit(i), 100).project(this.camera);
+        const b = origin
+          .clone()
+          .addScaledVector(unit(i), 100)
+          .project(this.camera);
         return new T.Vector2(
           ((b.x - a.x) * rect.width) / 2,
           (-(b.y - a.y) * rect.height) / 2,
@@ -1439,21 +1782,34 @@ export class Viewport {
       const ia = ai(host.axis),
         point: Vec = [...f.origin];
       point[ia] =
-        (f.u[0] === ia ? f.origin[ia] + bracket.sa * 15 : f.origin[ia]) + delta[ia];
-      const res = bracketAt(drag.base.parts, host, bracket.face, bracket.sign, point, {
-        orient: drag.orient ?? orientOf(bracket),
-        step,
-        join: this.cfg.attach && !e.altKey,
-        id: bracket.id,
-        label: bracket.label,
-      });
+        (f.u[0] === ia ? f.origin[ia] + bracket.sa * 15 : f.origin[ia]) +
+        delta[ia];
+      const res = bracketAt(
+        drag.base.parts,
+        host,
+        bracket.face,
+        bracket.sign,
+        point,
+        {
+          orient: drag.orient ?? orientOf(bracket),
+          step,
+          join: this.cfg.attach && !e.altKey,
+          id: bracket.id,
+          label: bracket.label,
+        },
+      );
       if (!res.bracket) {
         this.cb.message(res.error);
         return;
       }
       const next = clone(drag.base);
       const i = next.parts.findIndex((p) => p.id === bracket.id);
-      next.parts[i] = { ...res.bracket, locked: bracket.locked, hidden: bracket.hidden, group: bracket.group };
+      next.parts[i] = {
+        ...res.bracket,
+        locked: bracket.locked,
+        hidden: bracket.hidden,
+        group: bracket.group,
+      };
       if (!bracket.group) delete (next.parts[i] as Bracket).group;
       if (!bracket.locked) delete next.parts[i].locked;
       if (!bracket.hidden) delete next.parts[i].hidden;
@@ -1486,6 +1842,16 @@ export class Viewport {
     );
   };
   private up = (e: PointerEvent) => {
+    if (this.referenceDrag) {
+      e.stopImmediatePropagation();
+      const d = this.referenceDrag;
+      this.referenceDrag = null;
+      this.controls.enabled = true;
+      this.cb.commit(d.preview);
+      if (this.renderer.domElement.hasPointerCapture(e.pointerId))
+        this.renderer.domElement.releasePointerCapture(e.pointerId);
+      return;
+    }
     if (this.looking && e.button === this.looking.button) {
       e.stopImmediatePropagation();
       this.stopLook();
@@ -1539,7 +1905,9 @@ export class Viewport {
             p.kind === "bracket" &&
             !!p.b &&
             !d.ids.includes(p.id) &&
-            d.base.parts.some((q) => q.id === p.id && q.kind === "bracket" && !q.b),
+            d.base.parts.some(
+              (q) => q.id === p.id && q.kind === "bracket" && !q.b,
+            ),
         );
         this.cb.message(
           was?.kind === "bracket" && now?.kind === "bracket" && was.b !== now.b
@@ -1557,6 +1925,11 @@ export class Viewport {
   private cancel = () => {
     this.resetAttachment();
     this.stopNavigation();
+    if (this.referenceDrag) {
+      this.referenceDrag = null;
+      this.controls.enabled = true;
+      this.rebuild(this.cfg.project);
+    }
     if (this.drag) {
       this.drag = null;
       this.controls.enabled = true;
@@ -1590,6 +1963,21 @@ export class Viewport {
       (p) => !p.hidden && (!selection || this.cfg.selection.includes(p.id)),
     );
     const b = bounds(parts);
+    const refs = (this.cfg.project.references ?? []).filter(
+      (r) =>
+        !r.hidden &&
+        !this.cfg.guide &&
+        (!selection || r.id === this.cfg.reference),
+    );
+    if (refs.length) {
+      const box = parts.length
+        ? new T.Box3(v3(b.min), v3(b.max))
+        : new T.Box3();
+      refs.forEach((r) => box.union(referenceBounds(r)));
+      b.min = dataVec(box.min);
+      b.max = dataVec(box.max);
+      b.size = dataVec(box.getSize(new T.Vector3()));
+    }
     if (parts.length && !parts.some((p) => p.kind === "rail")) {
       const ps = parts.map((p) => partPosition(p, this.cfg.project.parts));
       for (let i = 0; i < 3; i++) {
@@ -1597,6 +1985,12 @@ export class Viewport {
         b.max[i] = Math.max(...ps.map((p) => p[i])) + 35;
         b.size[i] = b.max[i] - b.min[i];
       }
+    }
+    const guideBounds = this.bench.bounds(selection);
+    if (guideBounds) {
+      b.min = dataVec(guideBounds.min);
+      b.max = dataVec(guideBounds.max);
+      b.size = dataVec(guideBounds.getSize(new T.Vector3()));
     }
     const center = new T.Vector3(
       ...(b.min.map((v, i) => (v + b.max[i]) / 2) as Vec),
@@ -1606,9 +2000,10 @@ export class Viewport {
       .sub(this.controls.target)
       .normalize();
     this.controls.target.copy(center);
-    this.scale = parts.length
-      ? Math.max(150, new T.Vector3(...b.size).length() * 1.1)
-      : 800;
+    this.scale =
+      parts.length || refs.length
+        ? Math.max(150, new T.Vector3(...b.size).length() * 1.1)
+        : 800;
     let distance = 1800;
     if (this.camera instanceof T.PerspectiveCamera) {
       // Fit is an explicit camera reset. Do not carry an orthographic zoom's
@@ -1630,7 +2025,10 @@ export class Viewport {
     this.size();
     this.controls.update();
   }
-  view(view: "perspective" | "top" | "front" | "right") {
+  view(
+    view:
+      "perspective" | "top" | "front" | "right" | "back" | "left" | "bottom",
+  ) {
     this.stopNavigation();
     if (view === "perspective") this.usePerspective();
     else if (this.camera instanceof T.PerspectiveCamera) {
@@ -1653,6 +2051,9 @@ export class Viewport {
       top: [0, 1, 0.00001],
       front: [0, 0, 1],
       right: [1, 0, 0],
+      back: [0, 0, -1],
+      left: [-1, 0, 0],
+      bottom: [0, -1, 0.00001],
     };
     this.camera.position
       .copy(center)
@@ -1664,44 +2065,141 @@ export class Viewport {
     this.camera.up.set(0, 1, 0);
     this.controls.update();
   }
+  orbit(dx: number, dy: number) {
+    this.stopNavigation();
+    this.usePerspective();
+    const offset = this.camera.position.clone().sub(this.controls.target),
+      spherical = new T.Spherical().setFromVector3(offset);
+    spherical.theta -= dx * 0.008;
+    spherical.phi = T.MathUtils.clamp(
+      spherical.phi - dy * 0.008,
+      0.01,
+      Math.PI - 0.01,
+    );
+    this.camera.position
+      .copy(this.controls.target)
+      .add(new T.Vector3().setFromSpherical(spherical));
+    this.controls.update();
+    this.cb.navigating();
+  }
+  orient(direction: Vec) {
+    const face = direction.filter((n) => n !== 0).length === 1;
+    if (face) {
+      const view = direction[0]
+        ? direction[0] > 0
+          ? "right"
+          : "left"
+        : direction[1]
+          ? direction[1] > 0
+            ? "top"
+            : "bottom"
+          : direction[2] > 0
+            ? "front"
+            : "back";
+      this.view(view);
+      this.cb.navigating(view);
+    } else {
+      this.usePerspective();
+      const distance = this.camera.position.distanceTo(this.controls.target);
+      this.camera.position
+        .copy(this.controls.target)
+        .add(v3(direction).normalize().multiplyScalar(distance));
+      this.controls.update();
+    }
+    if (!face) this.cb.navigating();
+  }
+  focusGuide() {
+    const ids = this.cfg.guide?.active;
+    if (!ids) return;
+    const previous = this.cfg;
+    this.cfg = { ...previous, selection: ids };
+    this.fit(true);
+    this.cfg = previous;
+  }
+  exportSTL(includeReferences = false) {
+    const group = new T.Group();
+    for (const p of this.cfg.project.parts)
+      if (!p.hidden) group.add(this.meshPart(p, this.cfg.project.parts));
+    if (includeReferences)
+      for (const r of this.cfg.project.references ?? [])
+        if (!r.hidden && r.kind !== "ruler") group.add(referenceView(r, false));
+    if (!group.children.length) throw new Error("Nothing visible to export.");
+    group.updateMatrixWorld(true);
+    try {
+      const data = new STLExporter().parse(group, { binary: true });
+      return new Blob([new Uint8Array(data.buffer as ArrayBuffer)], {
+        type: "model/stl",
+      });
+    } finally {
+      this.clearGroup(group);
+    }
+  }
   zoom(factor: number) {
     this.camera.zoom = Math.max(0.08, Math.min(20, this.camera.zoom * factor));
     this.camera.updateProjectionMatrix();
   }
-  image() {
+  image(exportConfig?: ViewConfig) {
+    // Printable exports temporarily show the full design. Keep that temporary
+    // scene from changing the user's paused motion, projection or camera pose.
+    const previous = exportConfig
+      ? {
+          cfg: this.cfg,
+          camera: this.camera.clone(),
+          target: this.controls.target.clone(),
+          scale: this.scale,
+        }
+      : null;
     const gizmoVisible = this.gizmo.visible;
-    this.gizmo.visible = false;
-    this.renderer.render(this.scene, this.camera);
-    const canvas = document.createElement("canvas");
-    canvas.width = this.renderer.domElement.width;
-    canvas.height = this.renderer.domElement.height;
-    const ctx = canvas.getContext("2d")!;
-    ctx.drawImage(this.renderer.domElement, 0, 0);
-    const ratio = canvas.width / this.host.clientWidth;
-    ctx.font = `${11 * ratio}px monospace`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    for (const l of this.labels) {
-      const p = l.p.clone().project(this.camera);
-      if (p.z < -1 || p.z > 1) continue;
-      const x = ((p.x + 1) * canvas.width) / 2,
-        y = ((-p.y + 1) * canvas.height) / 2;
-      const text = l.el.textContent || "",
-        width = ctx.measureText(text).width;
-      ctx.fillStyle = "#292f35";
-      ctx.fillRect(
-        x - width / 2 - 5 * ratio,
-        y - 9 * ratio,
-        width + 10 * ratio,
-        18 * ratio,
-      );
-      ctx.fillStyle = "#d3dae1";
-      ctx.fillText(text, x, y);
+    try {
+      if (exportConfig) this.update(exportConfig);
+      this.gizmo.visible = false;
+      this.renderer.render(this.scene, this.camera);
+      const canvas = document.createElement("canvas");
+      canvas.width = this.renderer.domElement.width;
+      canvas.height = this.renderer.domElement.height;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(this.renderer.domElement, 0, 0);
+      const ratio = canvas.width / this.host.clientWidth;
+      ctx.font = `${11 * ratio}px monospace`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      for (const l of this.labels) {
+        const worldPosition = this.cfg.guide
+          ? this.guideRoot.localToWorld(l.p.clone())
+          : l.p.clone();
+        const p = worldPosition.project(this.camera);
+        if (p.z < -1 || p.z > 1) continue;
+        const x = ((p.x + 1) * canvas.width) / 2,
+          y = ((-p.y + 1) * canvas.height) / 2;
+        const text = l.el.textContent || "",
+          width = ctx.measureText(text).width;
+        ctx.fillStyle = "#292f35";
+        ctx.fillRect(
+          x - width / 2 - 5 * ratio,
+          y - 9 * ratio,
+          width + 10 * ratio,
+          18 * ratio,
+        );
+        ctx.fillStyle = "#d3dae1";
+        ctx.fillText(text, x, y);
+      }
+      return canvas.toDataURL("image/png");
+    } finally {
+      if (previous) {
+        this.update(previous.cfg, true);
+        this.camera = previous.camera;
+        this.controls.object = this.camera;
+        this.controls.target.copy(previous.target);
+        this.scale = previous.scale;
+        this.size();
+        this.controls.update();
+      }
+      this.gizmo.visible = gizmoVisible;
     }
-    this.gizmo.visible = gizmoVisible;
-    return canvas.toDataURL("image/png");
   }
   dispose() {
+    this.bench.dispose();
+    this.cube.dispose();
     window.removeEventListener("keydown", this.attachmentKey, true);
     this.clearGroup(this.contacts);
     this.stopNavigation();
@@ -1713,6 +2211,7 @@ export class Viewport {
     cancelAnimationFrame(this.frame);
     this.resize.disconnect();
     this.controls.dispose();
+    this.clearGroup(this.references);
     this.clearGroup(this.world);
     this.clearGroup(this.ghost);
     this.clearGroup(this.helpers);

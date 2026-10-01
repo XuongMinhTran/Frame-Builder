@@ -59,6 +59,16 @@ import {
 import type { Axis, Bracket, Nut, Part, Project, Rail, Vec } from "./model";
 import { Viewport } from "./viewport";
 import type { Placement, ViewConfig } from "./viewport";
+import { buildPlan, describeRail } from "./assembly";
+import {
+  importMesh,
+  newReference,
+  validateReferences,
+  MAX_PROJECT_BYTES,
+} from "./references";
+import type { ReferenceObject } from "./references";
+import { ReferencePanel } from "./features/ReferencePanel";
+import { BuildGuide } from "./features/BuildGuide";
 import "./style.css";
 
 const RECOVERY = "glowframes.recovery.v1";
@@ -110,7 +120,9 @@ function constructionDocument(p: Project, image: string) {
         round(f.origin[ia] - (a.p[ia] - a.length / 2)),
         `${c.sa > 0 ? "+" : "−"}${a.axis.toUpperCase()}`,
         c.b ? rail(p.parts, c.b)?.label : "—",
-        bracketType(c, p.parts) === "stacked" ? "Holes near corner" : "Standard",
+        bracketType(c, p.parts) === "stacked"
+          ? "Holes near corner"
+          : "Standard",
       ];
     }),
   )}<h2>Independent mounting points</h2>${table(
@@ -427,10 +439,27 @@ function RailGlyph({ length, max }: { length: number; max: number }) {
         </linearGradient>
       </defs>
       <path d={`M${x} ${y} l${d} -${d} h${w} l-${d} ${d} z`} fill="#eef1f3" />
-      <line x1={x + d / 2 + 2} y1={y - d / 2} x2={x + w + d / 2 - 2} y2={y - d / 2} stroke="#8d969c" strokeWidth="1.4" />
+      <line
+        x1={x + d / 2 + 2}
+        y1={y - d / 2}
+        x2={x + w + d / 2 - 2}
+        y2={y - d / 2}
+        stroke="#8d969c"
+        strokeWidth="1.4"
+      />
       <rect x={x} y={y} width={w} height={h} fill="url(#rgf)" />
-      <line x1={x} y1={y + h / 2} x2={x + w} y2={y + h / 2} stroke="#566067" strokeWidth="1.6" />
-      <path d={`M${x + w} ${y} l${d} -${d} v${h} l-${d} ${d} z`} fill="#7a838a" />
+      <line
+        x1={x}
+        y1={y + h / 2}
+        x2={x + w}
+        y2={y + h / 2}
+        stroke="#566067"
+        strokeWidth="1.6"
+      />
+      <path
+        d={`M${x + w} ${y} l${d} -${d} v${h} l-${d} ${d} z`}
+        fill="#7a838a"
+      />
     </svg>
   );
 }
@@ -447,7 +476,15 @@ function BracketGlyph() {
 function NutGlyph() {
   return (
     <svg viewBox="0 0 100 40" className="glyph" aria-hidden="true">
-      <rect x="32" y="12" width="36" height="16" rx="4" fill="#cfb883" stroke="#7a6640" />
+      <rect
+        x="32"
+        y="12"
+        width="36"
+        height="16"
+        rx="4"
+        fill="#cfb883"
+        stroke="#7a6640"
+      />
       <circle cx="50" cy="20" r="4.5" fill="#3a3530" />
       <circle cx="50" cy="20" r="2" fill="#6b604d" />
     </svg>
@@ -462,6 +499,17 @@ const kindIcon = (k: Part["kind"]) => (
 type Modal = "part" | "step" | "help" | null;
 
 function App() {
+  const [workspace, setWorkspace] = useState<"frame" | "fit" | "guide">(
+    "frame",
+  );
+  const [navigation, setNavigation] = useState<"drone" | "orbit">("drone");
+  const [reference, setReference] = useState<string | null>(null);
+  const [guideIndex, setGuideIndex] = useState(0);
+  const [guidePlaying, setGuidePlaying] = useState(false);
+  const [guideReplay, setGuideReplay] = useState(0);
+  const [importUnits, setImportUnits] = useState(1);
+  const [recoveryFailed, setRecoveryFailed] = useState(false);
+  const modelFile = useRef<HTMLInputElement>(null);
   const [project, setProject] = useState<Project>(() => {
     try {
       const saved = localStorage.getItem(RECOVERY);
@@ -498,7 +546,7 @@ function App() {
     [modal, setModal] = useState<Modal>(null),
     [revision, setRevision] = useState(0),
     [currentView, setCurrentView] = useState<
-      "perspective" | "top" | "front" | "right"
+      "perspective" | "top" | "front" | "right" | "back" | "left" | "bottom"
     >("perspective"),
     [webglError, setWebglError] = useState(""),
     [open, setOpen] = useState({
@@ -522,7 +570,8 @@ function App() {
     latest = useRef({ project, repeat }),
     timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   latest.current = { project, repeat };
-  const toggle = (k: keyof typeof open) => setOpen((o) => ({ ...o, [k]: !o[k] }));
+  const toggle = (k: keyof typeof open) =>
+    setOpen((o) => ({ ...o, [k]: !o[k] }));
 
   const notify = useCallback((s: string) => {
     setMessage(s);
@@ -534,7 +583,7 @@ function App() {
   }, []);
   const commit = useCallback((p: Project) => {
     if (JSON.stringify(p) === JSON.stringify(latest.current.project)) return;
-    history.current.push(clone(latest.current.project));
+    history.current.push(latest.current.project);
     if (history.current.length > 100) history.current.shift();
     future.current = [];
     latest.current.project = p;
@@ -542,6 +591,37 @@ function App() {
     setDirty(true);
     setRevision((n) => n + 1);
   }, []);
+  const guideSteps = useMemo(
+    () => buildPlan(project),
+    [project.parts, project.fastenersPerSide],
+  );
+  const activeGuideIndex = Math.min(
+    guideIndex,
+    Math.max(0, guideSteps.length - 1),
+  );
+  useEffect(() => {
+    setGuideIndex(0);
+  }, [project.parts, project.fastenersPerSide]);
+  useEffect(() => {
+    if (reference && !project.references?.some((r) => r.id === reference))
+      setReference(null);
+  }, [project, reference]);
+  useEffect(() => {
+    setGuidePlaying(
+      workspace === "guide" &&
+        !!guideSteps[activeGuideIndex]?.motion &&
+        !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+    );
+  }, [workspace, activeGuideIndex, guideSteps]);
+  const selectReference = (id: string | null) => {
+    setReference(id);
+    if (id) {
+      setSelection([]);
+      setPlacement(null);
+      setTool("select");
+      setWorkspace("fit");
+    }
+  };
   const cfg: ViewConfig = {
     project,
     selection,
@@ -554,19 +634,29 @@ function App() {
     grid,
     tool,
     moveAxis,
+    navigation,
+    reference,
+    guide:
+      workspace === "guide" ? (guideSteps[activeGuideIndex] ?? null) : null,
+    guidePlaying,
+    guideReplay,
   };
   useEffect(() => {
     if (!host.current) return;
     try {
       viewport.current = new Viewport(host.current, cfg, {
-        select: setSelection,
+        select: (ids) => {
+          setSelection(ids);
+          if (ids.length) setReference(null);
+        },
+        selectReference,
         commit,
         message: notify,
         placed: () => {
           if (!latest.current.repeat) setPlacement(null);
         },
         measure: setMeasure,
-        navigating: () => setCurrentView("perspective"),
+        navigating: (v = "perspective") => setCurrentView(v),
       });
       viewport.current.fit();
     } catch (e) {
@@ -591,12 +681,22 @@ function App() {
     grid,
     tool,
     moveAxis,
+    navigation,
+    reference,
+    workspace,
+    activeGuideIndex,
+    guideSteps,
+    guidePlaying,
+    guideReplay,
   ]);
   useEffect(() => {
     const t = setTimeout(() => {
       try {
         localStorage.setItem(RECOVERY, JSON.stringify(project));
-      } catch {}
+        setRecoveryFailed(false);
+      } catch {
+        setRecoveryFailed(true);
+      }
     }, 500);
     return () => clearTimeout(t);
   }, [project]);
@@ -623,7 +723,7 @@ function App() {
   /* ----- commands ----- */
   const restore = (p: Project | undefined, into: Project[], label: string) => {
     if (!p) return;
-    into.push(clone(latest.current.project));
+    into.push(latest.current.project);
     latest.current.project = p;
     setProject(p);
     setSelection((s) => s.filter((id) => p.parts.some((x) => x.id === id)));
@@ -648,10 +748,12 @@ function App() {
     e.target.value = "";
     if (!f) return;
     try {
-      if (f.size > 5_000_000) throw new Error("File is larger than 5 MB.");
+      if (f.size > MAX_PROJECT_BYTES)
+        throw new Error("File is larger than 25 MB.");
       const p = parseProject(await f.text());
       commit(p);
       setSelection([]);
+      setReference(null);
       setPlacement(null);
       setDirty(false);
       notify(`Opened ${f.name}`);
@@ -674,7 +776,112 @@ function App() {
     setMeasure(null);
     setContext(null);
   };
+  const switchWorkspace = (next: typeof workspace) => {
+    cancel();
+    setWorkspace(next);
+    setSelection([]);
+    setReference(null);
+    setTool("select");
+  };
+  const addReference = (kind: ReferenceObject["kind"]) => {
+    const b = bounds(project.parts);
+    const ref = newReference(kind, [
+      (b.min[0] + b.max[0]) / 2,
+      kind === "ruler" ? 3 : Math.max(50, (b.min[1] + b.max[1]) / 2),
+      kind === "ruler" ? b.max[2] + 50 : (b.min[2] + b.max[2]) / 2,
+    ]);
+    if (kind === "ruler") ref.p[0] = b.min[0];
+    const references = [...(project.references ?? []), ref];
+    try {
+      validateReferences(references);
+      commit({ ...project, references });
+      selectReference(ref.id);
+    } catch (e) {
+      notify((e as Error).message);
+    }
+  };
+  const updateReference = (id: string, changes: Partial<ReferenceObject>) => {
+    const references = project.references?.map((r) =>
+      r.id === id ? { ...r, ...changes } : r,
+    );
+    try {
+      validateReferences(references);
+      commit({ ...project, references });
+    } catch (e) {
+      notify((e as Error).message);
+    }
+  };
+  const removeReference = () => {
+    commit({
+      ...project,
+      references: project.references?.filter((r) => r.id !== reference),
+    });
+    setReference(null);
+  };
+  const duplicateReference = () => {
+    const ref = project.references?.find((r) => r.id === reference);
+    if (!ref) return;
+    const copy: ReferenceObject = {
+      ...ref,
+      id: uid(),
+      name: `${ref.name.slice(0, 74)} copy`,
+      p: [ref.p[0] + 30, ref.p[1], ref.p[2] + 30],
+    };
+    const references = [...(project.references ?? []), copy];
+    try {
+      validateReferences(references);
+      commit({ ...project, references });
+      selectReference(copy.id);
+    } catch (e) {
+      notify((e as Error).message);
+    }
+  };
+  const loadModel = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    try {
+      if (f.size > 10_000_000)
+        throw new Error("Model exceeds 10 MB. Use a simpler STL or OBJ.");
+      const ref = importMesh(await f.arrayBuffer(), f.name, importUnits);
+      const current = latest.current.project,
+        b = bounds(current.parts);
+      ref.p = [
+        (b.min[0] + b.max[0]) / 2,
+        Math.max(ref.size[1] / 2, (b.min[1] + b.max[1]) / 2),
+        (b.min[2] + b.max[2]) / 2,
+      ];
+      const references = [...(current.references ?? []), ref];
+      validateReferences(references);
+      commit({ ...current, references });
+      selectReference(ref.id);
+      notify(`Imported ${f.name} · ${ref.size.map(round).join(" × ")} mm`);
+      requestAnimationFrame(() => viewport.current?.fit());
+    } catch (e) {
+      notify(e instanceof Error ? e.message : "Could not read that model.");
+    }
+  };
+  const exportSTL = (includeReferences = false) => {
+    try {
+      const blob = viewport.current?.exportSTL(includeReferences);
+      if (!blob) throw new Error("The 3D view is unavailable.");
+      download(
+        blob,
+        filename(project.name) +
+          (includeReferences ? "-scene.stl" : "-frame.stl"),
+      );
+      notify(
+        "STL exported in millimeters. It contains mesh geometry; save .glowframe to keep editable parts.",
+      );
+    } catch (e) {
+      notify((e as Error).message);
+    }
+  };
   const remove = (ids = selection) => {
+    if (reference) {
+      removeReference();
+      return;
+    }
     ids = ids.filter((id) => !project.parts.find((p) => p.id === id)?.locked);
     if (!ids.length) return;
     const blocked = project.parts.find(
@@ -692,6 +899,10 @@ function App() {
     notify(`Deleted ${ids.length} part${ids.length > 1 ? "s" : ""}`);
   };
   const duplicate = () => {
+    if (reference) {
+      duplicateReference();
+      return;
+    }
     const p = clone(project),
       idMap = new Map<string, string>(),
       newIds: string[] = [];
@@ -722,8 +933,12 @@ function App() {
         } else {
           // Copy it further along the same frame.
           const point = [...f.origin] as Vec;
-          point[ai(host.axis)] += (n.across ? 1 : n.sa) * 40 + (n.across ? 0 : n.sa * 15);
-          const res = bracketAt(p.parts, host, n.face, n.sign, point, { orient: orientOf(n), join: attach });
+          point[ai(host.axis)] +=
+            (n.across ? 1 : n.sa) * 40 + (n.across ? 0 : n.sa * 15);
+          const res = bracketAt(p.parts, host, n.face, n.sign, point, {
+            orient: orientOf(n),
+            join: attach,
+          });
           if (!res.bracket) continue;
           Object.assign(n, { ...res.bracket, id: n.id, label: n.label });
         }
@@ -742,7 +957,11 @@ function App() {
     p.parts.filter((x) => ids.includes(x.id)).forEach(fn);
     commit(p);
   };
-  const showAll = () => alter((x) => (x.hidden = false), project.parts.map((x) => x.id));
+  const showAll = () =>
+    alter(
+      (x) => (x.hidden = false),
+      project.parts.map((x) => x.id),
+    );
   const validateCommit = (p: Project) => {
     const clearance = newClearanceError(project.parts, p.parts);
     if (clearance) {
@@ -780,6 +999,18 @@ function App() {
     validateCommit(p);
   };
   const rotate = () => {
+    if (reference) {
+      const ref = project.references?.find((r) => r.id === reference);
+      if (ref)
+        updateReference(ref.id, {
+          rotation: [
+            ref.rotation[0],
+            (ref.rotation[1] + 90) % 360,
+            ref.rotation[2],
+          ],
+        });
+      return;
+    }
     if (placement?.kind === "rail") {
       const a = axes[(ai(placement.axis) + 1) % 3];
       setAxis(a);
@@ -803,12 +1034,17 @@ function App() {
     viewport.current?.cancelOperation();
   };
   const put = (kind: Part["kind"], length = 200) => {
+    setReference(null);
     setPlacement(kind === "rail" ? { kind, length, axis } : { kind });
     setTool("select");
   };
   /** Press on a shelf tile: drag it into the view to drop it there, or just
    * click it and then click in the view. Keys (R, Alt) work while dragging. */
-  const shelfDrag = (e: React.PointerEvent, kind: Part["kind"], length = 200) => {
+  const shelfDrag = (
+    e: React.PointerEvent,
+    kind: Part["kind"],
+    length = 200,
+  ) => {
     if (e.button !== 0) return;
     e.preventDefault();
     put(kind, length);
@@ -816,7 +1052,8 @@ function App() {
     const up = (ev: PointerEvent) => {
       window.removeEventListener("pointerup", up, true);
       if (Math.hypot(ev.clientX - from[0], ev.clientY - from[1]) < 6) return;
-      if (host.current?.contains(ev.target as Node)) viewport.current?.dropAt(ev);
+      if (host.current?.contains(ev.target as Node))
+        viewport.current?.dropAt(ev);
       else if (!latest.current.repeat) setPlacement(null);
     };
     window.addEventListener("pointerup", up, true);
@@ -824,11 +1061,16 @@ function App() {
   const projectNew = (example: boolean) => {
     commit(example ? exampleProject() : emptyProject());
     setSelection([]);
+    setReference(null);
     setPlacement(null);
     requestAnimationFrame(() => viewport.current?.fit());
-    notify(example ? "Example opened — Undo brings back your frame" : "New frame — Undo brings back your old one");
+    notify(
+      example
+        ? "Example opened — Undo brings back your frame"
+        : "New frame — Undo brings back your old one",
+    );
   };
-  const exportFile = (type: "image" | "csv" | "sheet") => {
+  const exportFile = (type: "image" | "csv" | "sheet" | "guide") => {
     const name = filename(project.name);
     const view = viewport.current;
     if (type === "csv")
@@ -837,29 +1079,43 @@ function App() {
         name + "-parts.csv",
       );
     else if (view && type === "image") {
-      view.update({ ...cfg, selection: [], placement: null });
-      const data = view.image();
-      view.update(cfg);
+      const data = view.image({ ...cfg, selection: [], placement: null });
       download(data, name + ".png");
     } else if (view) {
-      view.update({
+      const image = view.image({
         ...cfg,
         selection: [],
-        labels: true,
+        labels: type !== "guide",
         dimensions: true,
         placement: null,
+        guide: null,
+        reference: null,
       });
-      const image = view.image();
-      view.update(cfg);
       download(
-        new Blob([constructionDocument(project, image)], {
-          type: "text/html;charset=utf-8",
-        }),
-        name + "-construction.html",
+        new Blob(
+          [
+            type === "guide"
+              ? `<!doctype html><html><head><meta charset="utf-8"><title>Assembly guide</title><style>body{font:15px/1.5 system-ui;max-width:900px;margin:40px auto;padding:20px}img{max-width:100%}section{border-top:1px solid #ccc;padding-top:12px}h2{font-size:20px}</style></head><body><h1>${escape(project.name)} — Assembly guide</h1><p>Match pieces by length and position. No physical labels are needed. Build one level at a time on a flat table.</p><img src="${image}" alt="Completed frame"></body></html>`.replace(
+                  "</body>",
+                  `<h2>Step-by-step assembly guide</h2>${buildPlan(project)
+                    .map(
+                      (s, i) =>
+                        `<section style="break-inside:avoid"><small>${escape(s.level ?? "")}</small><h2>${i + 1}. ${escape(s.title)}</h2><p>${escape(s.text)}</p><p><b>On the table:</b> ${escape(s.bench.label)}<br><b>Rest:</b> ${escape(s.support.resting)}<br><b>Hold:</b> ${escape(s.support.hold)}<br><b>Secure:</b> ${escape(s.support.secure)}</p>${s.hardware ? `<p><b>Have ready:</b> ${escape(s.hardware)}</p>` : ""}${s.mounts ? `<ul>${s.mounts.map((m) => `<li>${escape(describeRail(project, m.railId))} · face ${escape(m.face)} · ${m.offset} mm from the end shown as 0 mm · ${m.count} ${s.phase === "Connect" ? "screw(s) into preloaded T-nuts" : "T-nut(s)"} for ${escape(m.forLabel)}</li>`).join("")}</ul>` : ""}<p><b>Check:</b> ${escape(s.check)}</p></section>`,
+                    )
+                    .join("")}</body>`,
+                )
+              : constructionDocument(project, image),
+          ],
+          {
+            type: "text/html;charset=utf-8",
+          },
+        ),
+        name +
+          (type === "guide" ? "-assembly-guide.html" : "-construction.html"),
       );
     }
     notify(
-      type === "sheet"
+      type === "sheet" || type === "guide"
         ? "Build sheet downloaded — open it to print or save as PDF"
         : type === "image"
           ? "Image downloaded"
@@ -884,12 +1140,22 @@ function App() {
           : round(lo + ((hi - lo) * j) / (sorted.length - 1));
     });
     if (validateCommit(next))
-      notify(mode === "align" ? `Aligned on ${a.toUpperCase()}` : `Spaced evenly on ${a.toUpperCase()}`);
+      notify(
+        mode === "align"
+          ? `Aligned on ${a.toUpperCase()}`
+          : `Spaced evenly on ${a.toUpperCase()}`,
+      );
   };
   const replaceBracket = (b: Bracket, next: Bracket) => {
     const p = clone(project);
     const i = p.parts.findIndex((x) => x.id === b.id);
-    p.parts[i] = { ...next, id: b.id, label: b.label, ...(b.group ? { group: b.group } : {}), ...(b.hidden ? { hidden: true } : {}) };
+    p.parts[i] = {
+      ...next,
+      id: b.id,
+      label: b.label,
+      ...(b.group ? { group: b.group } : {}),
+      ...(b.hidden ? { hidden: true } : {}),
+    };
     return validateCommit(p);
   };
   /** Stop holding the second frame; the bracket stays on its own frame. */
@@ -899,7 +1165,13 @@ function App() {
     if (!f || !host || !b.b) return;
     if (b.locked) return notify(`${b.label} is locked`);
     const was = rail(project.parts, b.b)?.label;
-    if (replaceBracket(b, { ...b, b: "", offset: round(f.origin[ai(host.axis)] - host.p[ai(host.axis)]) }))
+    if (
+      replaceBracket(b, {
+        ...b,
+        b: "",
+        offset: round(f.origin[ai(host.axis)] - host.p[ai(host.axis)]),
+      })
+    )
       notify(`${b.label} no longer holds ${was} — that frame can move freely`);
   };
   /** Middle of a bracket's footprint along its frame, as a cursor point. */
@@ -920,10 +1192,17 @@ function App() {
     // Try the next quarter turn; if that doesn't fit here, keep turning.
     for (let k = 1; k < ORIENTS.length; k++) {
       const orient = (orientOf(b) + k) % ORIENTS.length;
-      const res = bracketAt(others, host, b.face, b.sign, point, { orient, join: attach, id: b.id, label: b.label });
+      const res = bracketAt(others, host, b.face, b.sign, point, {
+        orient,
+        join: attach,
+        id: b.id,
+        label: b.label,
+      });
       if (res.bracket) {
         if (replaceBracket(b, res.bracket))
-          notify(`${b.label} turned${k > 1 ? ` (${k * 90}° — no room at ${90}°)` : " 90°"}`);
+          notify(
+            `${b.label} turned${k > 1 ? ` (${k * 90}° — no room at ${90}°)` : " 90°"}`,
+          );
         return;
       }
     }
@@ -937,7 +1216,12 @@ function App() {
     const others = project.parts.filter((x) => x.id !== b.id);
     const point = [...host.p] as Vec;
     point[ai(host.axis)] = bracketPoint(b, host)[ai(host.axis)];
-    const res = bracketAt(others, host, face, sign, point, { orient: orientOf(b), join: attach, id: b.id, label: b.label });
+    const res = bracketAt(others, host, face, sign, point, {
+      orient: orientOf(b),
+      join: attach,
+      id: b.id,
+      label: b.label,
+    });
     if (!res.bracket) return notify(res.error);
     replaceBracket(b, res.bracket);
   };
@@ -948,8 +1232,15 @@ function App() {
     if (!toRemove.length) return notify(`${r.label} has no brackets`);
     if (r.locked || toRemove.some((p) => p.locked))
       return notify("Unlock the frame and its brackets first");
-    commit(removeParts(project, toRemove.map((p) => p.id)));
-    notify(`${r.label} detached — ${toRemove.length} bracket${toRemove.length > 1 ? "s" : ""} removed`);
+    commit(
+      removeParts(
+        project,
+        toRemove.map((p) => p.id),
+      ),
+    );
+    notify(
+      `${r.label} detached — ${toRemove.length} bracket${toRemove.length > 1 ? "s" : ""} removed`,
+    );
   };
   const view = (v: typeof currentView) => {
     viewport.current?.view(v);
@@ -964,17 +1255,35 @@ function App() {
           ? 0
           : 2;
     delta[i] = (["arrowleft", "arrowdown"].includes(k) ? -1 : 1) * step;
+    if (reference) {
+      const ref = project.references?.find((r) => r.id === reference);
+      if (ref)
+        updateReference(ref.id, {
+          p: ref.p.map((v, i) => round(v + delta[i])) as Vec,
+        });
+      return;
+    }
     const r = moveParts(project, selection, delta);
     if (r.error) notify(r.error);
     else commit(r.project);
   };
   const cycleStep = (dir: number) => {
     const index = STEPS.findIndex((s) => s >= step);
-    const next = STEPS[Math.max(0, Math.min(STEPS.length - 1, (index < 0 ? STEPS.length - 1 : index) + dir))];
+    const next =
+      STEPS[
+        Math.max(
+          0,
+          Math.min(
+            STEPS.length - 1,
+            (index < 0 ? STEPS.length - 1 : index) + dir,
+          ),
+        )
+      ];
     setStep(next);
     notify(`Step ${next} mm`);
   };
   const canRotate =
+    !!reference ||
     placement?.kind === "rail" ||
     placement?.kind === "bracket" ||
     single?.kind === "rail" ||
@@ -992,6 +1301,11 @@ function App() {
       }
       const mod = e.ctrlKey || e.metaKey,
         k = e.key.toLowerCase();
+      if (
+        workspace === "guide" &&
+        !["s", "f", "home", "1", "3", "7", "0", "5", "escape"].includes(k)
+      )
+        return;
       if (mod && k === "s") {
         e.preventDefault();
         save();
@@ -1014,15 +1328,18 @@ function App() {
       else if (k === "escape") {
         cancel();
         setSelection([]);
+        setReference(null);
       } else if (k === "delete" || k === "backspace") {
         e.preventDefault();
         remove();
       } else if (k === "r") {
         if (!viewport.current?.rotateDraggedBracket()) rotate();
-      }
-      else if (k === "v") setMode("select");
+      } else if (k === "v") setMode("select");
       else if (k === "m") setMode("measure");
-      else if (k === "f") viewport.current?.fit(!!selection.length);
+      else if (k === "f")
+        workspace === "guide"
+          ? viewport.current?.focusGuide()
+          : viewport.current?.fit(!!selection.length || !!reference);
       else if (k === "home") {
         e.preventDefault();
         viewport.current?.fit();
@@ -1036,11 +1353,15 @@ function App() {
       else if (axes.includes(k as Axis)) {
         const next = moveAxis === k ? "plane" : (k as Axis);
         setMoveAxis(next);
-        notify(next === "plane" ? "Free movement" : `Moving along ${next.toUpperCase()} only`);
+        notify(
+          next === "plane"
+            ? "Free movement"
+            : `Moving along ${next.toUpperCase()} only`,
+        );
       } else if (k === "[" || k === "]") cycleStep(k === "[" ? -1 : 1);
       else if (
         ["arrowleft", "arrowright", "arrowup", "arrowdown"].includes(k) &&
-        selection.length
+        (selection.length || reference)
       ) {
         e.preventDefault();
         nudge(k);
@@ -1048,15 +1369,33 @@ function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [project, selection, placement, step, moveAxis, modal, revision]);
+  }, [
+    project,
+    selection,
+    placement,
+    step,
+    moveAxis,
+    modal,
+    revision,
+    reference,
+    workspace,
+    navigation,
+  ]);
 
   /* ----- menus ----- */
   const partMenu = (ids: string[]): MenuItem[] => {
     const parts = project.parts.filter((p) => ids.includes(p.id));
     const one = parts.length === 1 ? parts[0] : null;
     return [
-      { label: "Select connected", action: () => setSelection(connectedIds(project.parts, ids)) },
-      { label: "Zoom to", shortcut: "F", action: () => requestAnimationFrame(() => viewport.current?.fit(true)) },
+      {
+        label: "Select connected",
+        action: () => setSelection(connectedIds(project.parts, ids)),
+      },
+      {
+        label: "Zoom to",
+        shortcut: "F",
+        action: () => requestAnimationFrame(() => viewport.current?.fit(true)),
+      },
       "-",
       { label: "Duplicate", shortcut: "Ctrl+D", action: duplicate },
       { label: "Delete", shortcut: "Del", action: () => remove(ids) },
@@ -1064,56 +1403,141 @@ function App() {
       {
         label: parts.every((p) => p.hidden) ? "Show" : "Hide",
         shortcut: "H",
-        action: () => alter((p) => (p.hidden = !parts.every((x) => x.hidden)), ids),
+        action: () =>
+          alter((p) => (p.hidden = !parts.every((x) => x.hidden)), ids),
       },
       {
         label: parts.every((p) => p.locked) ? "Unlock" : "Lock",
-        action: () => alter((p) => (p.locked = !parts.every((x) => x.locked)), ids),
+        action: () =>
+          alter((p) => (p.locked = !parts.every((x) => x.locked)), ids),
       },
       ...(one?.kind === "rail"
-        ? (["-", { label: "Detach from brackets", action: () => detach(one) }] as MenuItem[])
+        ? ([
+            "-",
+            { label: "Detach from brackets", action: () => detach(one) },
+          ] as MenuItem[])
         : one?.kind === "bracket"
           ? ([
               "-",
-              { label: "Rotate 90°", shortcut: "R", action: () => rotateBracket(one) },
-              ...(one.b ? [{ label: `Let go of ${rail(project.parts, one.b)?.label}`, action: () => release(one) }] : []),
+              {
+                label: "Rotate 90°",
+                shortcut: "R",
+                action: () => rotateBracket(one),
+              },
+              ...(one.b
+                ? [
+                    {
+                      label: `Let go of ${rail(project.parts, one.b)?.label}`,
+                      action: () => release(one),
+                    },
+                  ]
+                : []),
             ] as MenuItem[])
           : []),
     ];
   };
   const axisSub = (fn: (a: Axis) => void, disabled: boolean): MenuItem[] =>
-    axes.map((a) => ({ label: `Along ${a.toUpperCase()}`, action: () => fn(a), disabled }));
+    axes.map((a) => ({
+      label: `Along ${a.toUpperCase()}`,
+      action: () => fn(a),
+      disabled,
+    }));
   const menus: { label: string; items: MenuItem[] }[] = [
     {
       label: "File",
       items: [
         { label: "New", action: () => projectNew(false) },
         { label: "Open example frame", action: () => projectNew(true) },
-        { label: "Open…", shortcut: "Ctrl+O", action: () => file.current?.click() },
+        {
+          label: "Open…",
+          shortcut: "Ctrl+O",
+          action: () => file.current?.click(),
+        },
+        {
+          label: "Import model (STL / OBJ)…",
+          action: () => modelFile.current?.click(),
+        },
         "-",
         { label: "Save", shortcut: "Ctrl+S", action: save },
         "-",
         { label: "Export image (PNG)", action: () => exportFile("image") },
         { label: "Export parts list (CSV)", action: () => exportFile("csv") },
-        { label: "Export build sheet (printable)", action: () => exportFile("sheet") },
+        {
+          label: "Export build sheet (printable)",
+          action: () => exportFile("sheet"),
+        },
+        { label: "Export frame (STL)", action: () => exportSTL() },
+        {
+          label: "Export frame + fit objects (STL)",
+          action: () => exportSTL(true),
+        },
       ],
     },
     {
       label: "Edit",
       items: [
-        { label: "Undo", shortcut: "Ctrl+Z", action: undo, disabled: !history.current.length },
-        { label: "Redo", shortcut: "Ctrl+Y", action: redo, disabled: !future.current.length },
+        {
+          label: "Undo",
+          shortcut: "Ctrl+Z",
+          action: undo,
+          disabled: !history.current.length,
+        },
+        {
+          label: "Redo",
+          shortcut: "Ctrl+Y",
+          action: redo,
+          disabled: !future.current.length,
+        },
         "-",
-        { label: "Duplicate", shortcut: "Ctrl+D", action: duplicate, disabled: !selection.length },
-        { label: "Delete", shortcut: "Del", action: () => remove(), disabled: !selection.length },
-        { label: "Rotate", shortcut: "R", action: rotate, disabled: !canRotate },
+        {
+          label: "Duplicate",
+          shortcut: "Ctrl+D",
+          action: duplicate,
+          disabled: !selection.length,
+        },
+        {
+          label: "Delete",
+          shortcut: "Del",
+          action: () => remove(),
+          disabled: !selection.length,
+        },
+        {
+          label: "Rotate",
+          shortcut: "R",
+          action: rotate,
+          disabled: !canRotate,
+        },
         "-",
-        { label: "Select all", shortcut: "Ctrl+A", action: () => setSelection(project.parts.filter((p) => !p.hidden).map((p) => p.id)) },
-        { label: "Select connected", action: () => setSelection(connectedIds(project.parts, selection)), disabled: !selection.length },
-        { label: "Select none", shortcut: "Esc", action: () => setSelection([]), disabled: !selection.length },
+        {
+          label: "Select all",
+          shortcut: "Ctrl+A",
+          action: () =>
+            setSelection(
+              project.parts.filter((p) => !p.hidden).map((p) => p.id),
+            ),
+        },
+        {
+          label: "Select connected",
+          action: () => setSelection(connectedIds(project.parts, selection)),
+          disabled: !selection.length,
+        },
+        {
+          label: "Select none",
+          shortcut: "Esc",
+          action: () => setSelection([]),
+          disabled: !selection.length,
+        },
         "-",
-        { label: "Align centers", sub: axisSub((a) => spatial("align", a), selRails.length < 2), disabled: selRails.length < 2 },
-        { label: "Space evenly", sub: axisSub((a) => spatial("distribute", a), selRails.length < 3), disabled: selRails.length < 3 },
+        {
+          label: "Align centers",
+          sub: axisSub((a) => spatial("align", a), selRails.length < 2),
+          disabled: selRails.length < 2,
+        },
+        {
+          label: "Space evenly",
+          sub: axisSub((a) => spatial("distribute", a), selRails.length < 3),
+          disabled: selRails.length < 3,
+        },
         {
           label: "Group",
           action: () => {
@@ -1123,32 +1547,100 @@ function App() {
           },
           disabled: selection.length < 2,
         },
-        { label: "Ungroup", action: () => alter((p) => delete p.group), disabled: !selected.some((p) => p.group) },
+        {
+          label: "Ungroup",
+          action: () => alter((p) => delete p.group),
+          disabled: !selected.some((p) => p.group),
+        },
         "-",
-        { label: allHidden ? "Show" : "Hide", shortcut: "H", action: () => alter((p) => (p.hidden = !allHidden)), disabled: !selection.length },
-        { label: "Show all", shortcut: "Shift+H", action: showAll, disabled: !project.parts.some((p) => p.hidden) },
-        { label: allLocked ? "Unlock" : "Lock", action: () => alter((p) => (p.locked = !allLocked)), disabled: !selection.length },
+        {
+          label: allHidden ? "Show" : "Hide",
+          shortcut: "H",
+          action: () => alter((p) => (p.hidden = !allHidden)),
+          disabled: !selection.length,
+        },
+        {
+          label: "Show all",
+          shortcut: "Shift+H",
+          action: showAll,
+          disabled: !project.parts.some((p) => p.hidden),
+        },
+        {
+          label: allLocked ? "Unlock" : "Lock",
+          action: () => alter((p) => (p.locked = !allLocked)),
+          disabled: !selection.length,
+        },
       ],
     },
     {
       label: "View",
       items: [
-        { label: "Perspective", shortcut: "0", checked: currentView === "perspective", action: () => view("perspective") },
-        { label: "Top", shortcut: "7", checked: currentView === "top", action: () => view("top") },
-        { label: "Front", shortcut: "1", checked: currentView === "front", action: () => view("front") },
-        { label: "Right", shortcut: "3", checked: currentView === "right", action: () => view("right") },
+        {
+          label: "Drone controls · WASD",
+          checked: navigation === "drone",
+          action: () => setNavigation("drone"),
+        },
+        {
+          label: "Orbit controls · Blender style",
+          checked: navigation === "orbit",
+          action: () => setNavigation("orbit"),
+        },
         "-",
-        { label: "Zoom to selection", shortcut: "F", action: () => viewport.current?.fit(true), disabled: !selection.length },
-        { label: "Zoom to everything", shortcut: "Home", action: () => viewport.current?.fit() },
+        {
+          label: "Perspective",
+          shortcut: "0",
+          checked: currentView === "perspective",
+          action: () => view("perspective"),
+        },
+        {
+          label: "Top",
+          shortcut: "7",
+          checked: currentView === "top",
+          action: () => view("top"),
+        },
+        {
+          label: "Front",
+          shortcut: "1",
+          checked: currentView === "front",
+          action: () => view("front"),
+        },
+        {
+          label: "Right",
+          shortcut: "3",
+          checked: currentView === "right",
+          action: () => view("right"),
+        },
+        "-",
+        {
+          label: "Zoom to selection",
+          shortcut: "F",
+          action: () => viewport.current?.fit(true),
+          disabled: !selection.length,
+        },
+        {
+          label: "Zoom to everything",
+          shortcut: "Home",
+          action: () => viewport.current?.fit(),
+        },
         "-",
         { label: "Grid", checked: grid, action: () => setGrid(!grid) },
-        { label: "Frame names", checked: labels, action: () => setLabels(!labels) },
-        { label: "Overall dimensions", checked: dimensions, action: () => setDimensions(!dimensions) },
+        {
+          label: "Frame names",
+          checked: labels,
+          action: () => setLabels(!labels),
+        },
+        {
+          label: "Overall dimensions",
+          checked: dimensions,
+          action: () => setDimensions(!dimensions),
+        },
       ],
     },
     {
       label: "Help",
-      items: [{ label: "Controls…", shortcut: "", action: () => setModal("help") }],
+      items: [
+        { label: "Controls…", shortcut: "", action: () => setModal("help") },
+      ],
     },
   ];
 
@@ -1165,7 +1657,9 @@ function App() {
         : "Measure — click two points"
       : selection.length
         ? "Drag to move · arrows nudge · R rotate · Del delete · right-drag look"
-        : "Drag a part up from the shelf · click to select · right-drag look · WASD fly";
+        : navigation === "drone"
+          ? "Drag a part up from the shelf · click to select · right-drag look · WASD fly"
+          : "Drag a part up from the shelf · click to select · middle/right-drag orbit";
   const maxPreset = Math.max(...project.presets, 1);
 
   const railRows = (kind: Part["kind"]) =>
@@ -1189,7 +1683,9 @@ function App() {
               ),
             )
           }
-          onDoubleClick={() => setSelection(connectedIds(project.parts, [p.id]))}
+          onDoubleClick={() =>
+            setSelection(connectedIds(project.parts, [p.id]))
+          }
           onContextMenu={(e) => {
             e.preventDefault();
             const ids = selection.includes(p.id) ? selection : [p.id];
@@ -1214,8 +1710,19 @@ function App() {
 
   /* ----- render ----- */
   return (
-    <div className="app">
-      <MenuBar menus={menus}>
+    <div className="app" data-workspace={workspace}>
+      <MenuBar
+        menus={menus.map((m) =>
+          workspace === "guide" && m.label === "Edit"
+            ? {
+                ...m,
+                items: m.items.map((i) =>
+                  i === "-" ? i : { ...i, disabled: true },
+                ),
+              }
+            : m,
+        )}
+      >
         <span className="flex" />
         <span className="doc-title">
           {project.name}
@@ -1225,42 +1732,160 @@ function App() {
         <span className="app-name">gLOWframes</span>
       </MenuBar>
 
+      <div
+        className="workspace-tabs"
+        role="tablist"
+        aria-label="Workspace mode"
+      >
+        {(
+          [
+            ["frame", "Frame", "01"],
+            ["fit", "Fit check", "02"],
+            ["guide", "Build guide", "03"],
+          ] as const
+        ).map(([key, title, number]) => (
+          <button
+            key={key}
+            role="tab"
+            aria-selected={workspace === key}
+            className={workspace === key ? "active" : ""}
+            onClick={() => switchWorkspace(key)}
+          >
+            <span>{number}</span>
+            {title}
+          </button>
+        ))}
+        <span className="flex" />
+        <span className="workspace-description">
+          {workspace === "frame"
+            ? "Design your 20 × 20 mm frame"
+            : workspace === "fit"
+              ? "Shapes, models & measuring tools"
+              : "An interactive assembly walkthrough"}
+        </span>
+      </div>
+
       <div className="toolbar">
-        <Btn icon={FilePlus2} label="New frame" onClick={() => projectNew(false)} />
-        <Btn icon={FolderOpen} label="Open" shortcut="Ctrl+O" onClick={() => file.current?.click()} />
+        <Btn
+          icon={FilePlus2}
+          label="New frame"
+          onClick={() => projectNew(false)}
+        />
+        <Btn
+          icon={FolderOpen}
+          label="Open"
+          shortcut="Ctrl+O"
+          onClick={() => file.current?.click()}
+        />
         <Btn icon={Save} label="Save" shortcut="Ctrl+S" onClick={save} />
         <span className="tb-sep" />
-        <Btn icon={Undo2} label="Undo" shortcut="Ctrl+Z" onClick={undo} disabled={!history.current.length} />
-        <Btn icon={Redo2} label="Redo" shortcut="Ctrl+Y" onClick={redo} disabled={!future.current.length} />
+        <Btn
+          icon={Undo2}
+          label="Undo"
+          shortcut="Ctrl+Z"
+          onClick={undo}
+          disabled={!history.current.length}
+        />
+        <Btn
+          icon={Redo2}
+          label="Redo"
+          shortcut="Ctrl+Y"
+          onClick={redo}
+          disabled={!future.current.length}
+        />
         <span className="tb-sep" />
-        <Btn icon={MousePointer2} text="Select" label="Select and move" shortcut="V" active={tool === "select" && !placement} onClick={() => setMode("select")} />
-        <Btn icon={Ruler} text="Measure" label="Measure between two points" shortcut="M" active={tool === "measure"} onClick={() => setMode("measure")} />
+        <Btn
+          icon={MousePointer2}
+          text="Select"
+          label="Select and move"
+          shortcut="V"
+          active={tool === "select" && !placement}
+          onClick={() => setMode("select")}
+        />
+        <Btn
+          icon={Ruler}
+          text="Ruler"
+          label="Add a movable, extendable ruler"
+          onClick={() => addReference("ruler")}
+        />
+        <Btn
+          text="Distance"
+          label="Measure between two points"
+          shortcut="M"
+          active={tool === "measure"}
+          onClick={() => setMode("measure")}
+        />
         <span className="tb-sep" />
-        <Btn icon={RotateCw} label="Rotate" shortcut="R" onClick={rotate} disabled={!canRotate} />
-        <Btn icon={Copy} label="Duplicate" shortcut="Ctrl+D" onClick={duplicate} disabled={!selection.length} />
-        <Btn icon={Trash2} label="Delete" shortcut="Del" onClick={() => remove()} disabled={!selection.length} />
+        <Btn
+          icon={RotateCw}
+          label="Rotate"
+          shortcut="R"
+          onClick={rotate}
+          disabled={!canRotate}
+        />
+        <Btn
+          icon={Copy}
+          label="Duplicate"
+          shortcut="Ctrl+D"
+          onClick={duplicate}
+          disabled={!selection.length && !reference}
+        />
+        <Btn
+          icon={Trash2}
+          label="Delete"
+          shortcut="Del"
+          onClick={() => remove()}
+          disabled={!selection.length && !reference}
+        />
         <span className="tb-sep" />
         <span className="tb-label">Snap</span>
-        <Btn icon={Magnet} label="Snap moves to the step size (hold Alt to ignore)" active={snapEnabled} onClick={() => setSnapEnabled(!snapEnabled)} />
+        <Btn
+          icon={Magnet}
+          label="Snap moves to the step size (hold Alt to ignore)"
+          active={snapEnabled}
+          onClick={() => setSnapEnabled(!snapEnabled)}
+        />
         <select
           className="step-select"
           aria-label="Step size"
           title="Step size  ([ and ])"
           disabled={!snapEnabled}
           value={STEPS.includes(step) ? step : "custom"}
-          onChange={(e) => (e.target.value === "custom" ? setModal("step") : setStep(Number(e.target.value)))}
+          onChange={(e) =>
+            e.target.value === "custom"
+              ? setModal("step")
+              : setStep(Number(e.target.value))
+          }
         >
           {STEPS.map((n) => (
             <option value={n} key={n}>
               {n} mm
             </option>
           ))}
-          <option value="custom">{STEPS.includes(step) ? "Other…" : `${step} mm`}</option>
+          <option value="custom">
+            {STEPS.includes(step) ? "Other…" : `${step} mm`}
+          </option>
         </select>
-        <Btn icon={Link2} label="Snap frames flush against other frames" text="Faces" active={attach} onClick={() => setAttach(!attach)} />
+        <Btn
+          icon={Link2}
+          label="Snap frames flush against other frames"
+          text="Faces"
+          active={attach}
+          onClick={() => setAttach(!attach)}
+        />
         <span className="flex" />
-        <Btn icon={Camera} text="Image" label="Export image of this view (PNG)" onClick={() => exportFile("image")} />
-        <Btn icon={Printer} text="Build sheet" label="Export printable build sheet with dimensions and parts" onClick={() => exportFile("sheet")} />
+        <Btn
+          icon={Camera}
+          text="Image"
+          label="Export image of this view (PNG)"
+          onClick={() => exportFile("image")}
+        />
+        <Btn
+          icon={Printer}
+          text="Build sheet"
+          label="Export printable build sheet with dimensions and parts"
+          onClick={() => exportFile("sheet")}
+        />
       </div>
 
       <div className="workspace">
@@ -1271,15 +1896,34 @@ function App() {
               value={currentView}
               onChange={view}
               options={[
-                { value: "perspective", label: "Persp", title: "Perspective (0)" },
+                {
+                  value: "perspective",
+                  label: "Persp",
+                  title: "Perspective (0)",
+                },
                 { value: "top", label: "Top", title: "Top (7)" },
                 { value: "front", label: "Front", title: "Front (1)" },
                 { value: "right", label: "Right", title: "Right (3)" },
               ]}
             />
+            <select
+              className="navigation-select"
+              aria-label="Camera navigation"
+              value={navigation}
+              onChange={(e) =>
+                setNavigation(e.target.value as typeof navigation)
+              }
+            >
+              <option value="drone">Drone · WASD</option>
+              <option value="orbit">Orbit · Blender</option>
+            </select>
             <span className="flex" />
             {moveAxis !== "plane" && (
-              <span className="axis-lock" onClick={() => setMoveAxis("plane")} title="Click to free movement">
+              <span
+                className="axis-lock"
+                onClick={() => setMoveAxis("plane")}
+                title="Click to free movement"
+              >
                 Locked to <AxisLetter a={moveAxis} /> <X size={11} />
               </span>
             )}
@@ -1288,431 +1932,833 @@ function App() {
                 [
                   ["Grid", grid, setGrid, "Show floor grid"],
                   ["Names", labels, setLabels, "Show frame names"],
-                  ["Size", dimensions, setDimensions, "Show overall dimensions"],
+                  [
+                    "Size",
+                    dimensions,
+                    setDimensions,
+                    "Show overall dimensions",
+                  ],
                 ] as const
               ).map(([name, on, set, tip]) => (
-                <button key={name} className={on ? "on" : ""} title={tip} onClick={() => set(!on)}>
+                <button
+                  key={name}
+                  className={on ? "on" : ""}
+                  title={tip}
+                  onClick={() => set(!on)}
+                >
                   {name}
                 </button>
               ))}
             </div>
-            <Btn icon={Scan} label="Zoom to everything" shortcut="Home" onClick={() => viewport.current?.fit()} />
+            <Btn
+              icon={Scan}
+              label="Zoom to everything"
+              shortcut="Home"
+              onClick={() => viewport.current?.fit()}
+            />
           </div>
           <div className="view-area">
             <div ref={host} className="viewport" />
-            {webglError && <div className="webgl-error">{webglError}</div>}
-            {!project.parts.length && !placement && (
-              <div className="empty">Drag a frame up from the shelf below</div>
-            )}
-            {measure !== null && (
-              <div className="measure-tag">
-                {round(measure)} mm
-              </div>
-            )}
-          </div>
-          <div className="shelf" aria-label="Parts">
-            <div className="shelf-group">
-              <div className="shelf-label">
-                Frames <span>20 × 20 mm</span>
-              </div>
-              <div className="shelf-row">
-                {project.presets.map((length) => (
-                  <div
-                    key={length}
-                    className={`tile ${placement?.kind === "rail" && placement.length === length ? "sel" : ""}`}
-                    onPointerDown={(e) => shelfDrag(e, "rail", length)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setContext({
-                        x: e.clientX,
-                        y: e.clientY,
-                        items: [
-                          {
-                            label: "Remove from shelf",
-                            disabled: project.presets.length < 2,
-                            action: () => commit({ ...project, presets: project.presets.filter((x) => x !== length) }),
-                          },
-                        ],
-                      });
-                    }}
-                    title="Drag into the view, or click then click in the view"
-                  >
-                    <RailGlyph length={length} max={maxPreset} />
-                    <span className="tile-name">{cm(length)}</span>
-                  </div>
-                ))}
-                <div className="tile add" onClick={() => setModal("part")} title="Add another frame length">
-                  <span className="plus">+</span>
-                  <span className="tile-name">Other length</span>
-                </div>
-              </div>
-            </div>
-            <div className="shelf-group">
-              <div className="shelf-label">Points</div>
-              <div className="shelf-col">
-                <Seg
-                  value={placement?.kind === "rail" ? placement.axis : axis}
-                  title="Direction new frames point (R)"
-                  options={axes.map((a) => ({
-                    value: a,
-                    label: <AxisLetter a={a} />,
-                    title: a === "y" ? "Upright (Y)" : `Flat along ${a.toUpperCase()}`,
-                  }))}
-                  onChange={(a) => {
-                    setAxis(a);
-                    if (placement?.kind === "rail") setPlacement({ ...placement, axis: a });
-                  }}
-                />
-                <label className="check-row" title="Stay in placing mode after each drop">
-                  <input type="checkbox" checked={repeat} onChange={(e) => setRepeat(e.target.checked)} />
-                  Keep placing
-                </label>
-              </div>
-            </div>
-            <div className="shelf-group">
-              <div className="shelf-label">Hardware</div>
-              <div className="shelf-row">
-                {(
-                  [
-                    ["bracket", "Bracket 90°", <BracketGlyph />, "Drop where two frames meet"],
-                    ["nut", "T-nut", <NutGlyph />, "Drop on any frame face — for mounting things"],
-                  ] as const
-                ).map(([kind, name, glyph, tip]) => (
-                  <div
-                    key={kind}
-                    className={`tile ${placement?.kind === kind ? "sel" : ""}`}
-                    onPointerDown={(e) => shelfDrag(e, kind)}
-                    title={tip}
-                  >
-                    {glyph}
-                    <span className="tile-name">{name}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </main>
-
-        {/* ---- Right column ---- */}
-        <aside className="panel right">
-          <Section title="Outliner" grow open={open.outliner} onToggle={() => toggle("outliner")}>
-            <div className="tree" role="listbox" aria-multiselectable="true">
-              {(
-                [
-                  ["rail", "Frames"],
-                  ["bracket", "Brackets"],
-                  ["nut", "T-nuts"],
-                ] as const
-              ).map(([kind, name]) => {
-                const count = project.parts.filter((p) => p.kind === kind).length;
-                if (!count) return null;
-                return (
-                  <React.Fragment key={kind}>
-                    <div className="tree-row branch" onClick={() => toggle(kind)}>
-                      {open[kind] ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-                      <span className="name">{name}</span>
-                      <span className="desc">{count}</span>
-                    </div>
-                    {open[kind] && railRows(kind)}
-                  </React.Fragment>
-                );
-              })}
-              {!project.parts.length && <div className="tree-empty">Nothing yet</div>}
-            </div>
-          </Section>
-
-          <Section
-            title={single ? `${single.label} · ${single.kind === "rail" ? "Frame" : single.kind === "nut" ? "T-nut" : "Bracket"}` : selection.length ? `${selection.length} selected` : "Frame"}
-            open={open.properties}
-            onToggle={() => toggle("properties")}
-          >
-            <div className="props">
-              {single ? (
+            <div className="navigation-hint">
+              {navigation === "drone" ? (
                 <>
-                  {single.locked && (
-                    <div className="locked-bar">
-                      <Lock size={11} /> Locked
-                      <button className="mini" onClick={() => updateLock(single.id, false)}>Unlock</button>
-                    </div>
-                  )}
-                  <label className="prop">
-                    <span>Name</span>
-                    <input value={single.label} maxLength={80} disabled={single.locked} onChange={(e) => updatePart(single.id, { label: e.target.value })} />
-                  </label>
-                  {single.kind === "rail" && (
-                    <>
-                      <label className="prop">
-                        <span>Length</span>
-                        <NumberField label="Frame length" value={single.length} min={40} step={step} onChange={(v) => updatePart(single.id, { length: v })} />
-                        <em>mm</em>
-                      </label>
-                      <div className="prop">
-                        <span>Points</span>
-                        <Seg
-                          value={single.axis}
-                          disabled={single.locked}
-                          options={axes.map((a) => ({ value: a, label: <AxisLetter a={a} /> }))}
-                          onChange={(a) => updatePart(single.id, { axis: a })}
-                        />
-                      </div>
-                      <div className="prop-label">Center</div>
-                      <div className="xyz">
-                        {axes.map((a, i) => (
-                          <label key={a}>
-                            <AxisLetter a={a} />
-                            <NumberField
-                              label={`Center ${a.toUpperCase()}`}
-                              value={single.p[i]}
-                              step={step}
-                              onChange={(v) => {
-                                const delta: Vec = [0, 0, 0];
-                                delta[i] = v - single.p[i];
-                                const r = moveParts(project, selection, delta);
-                                r.error ? notify(r.error) : commit(r.project);
-                              }}
-                            />
-                          </label>
-                        ))}
-                      </div>
-                      <div className="prop-actions">
-                        <button className="mini" onClick={() => setSelection(connectedIds(project.parts, selection))}>Select connected</button>
-                        <button className="mini" onClick={() => detach(single)}>Detach</button>
-                      </div>
-                    </>
-                  )}
-                  {single.kind === "nut" && (() => {
-                    const r = rail(project.parts, single.rail);
-                    const len = r?.length || 0;
-                    return (
-                      <>
-                        <div className="prop">
-                          <span>On frame</span>
-                          <button className="link" onClick={() => setSelection([single.rail])}>{r?.label}</button>
-                        </div>
-                        <label className="prop">
-                          <span>Face</span>
-                          <select
-                            aria-label="T-nut face"
-                            value={`${single.sign},${single.face}`}
-                            disabled={single.locked}
-                            onChange={(e) => {
-                              const [sign, face] = e.target.value.split(",");
-                              updatePart(single.id, { sign: Number(sign), face: face as Axis });
-                            }}
-                          >
-                            {axes
-                              .filter((a) => a !== r?.axis)
-                              .flatMap((a) =>
-                                [1, -1].map((s) => (
-                                  <option key={`${s}${a}`} value={`${s},${a}`}>
-                                    {a === "y" ? (s > 0 ? "Top" : "Bottom") : `${s > 0 ? "+" : "−"}${a.toUpperCase()} side`}
-                                  </option>
-                                )),
-                              )}
-                          </select>
-                        </label>
-                        <label className="prop" title="Measured from the frame's low-coordinate end">
-                          <span>From end</span>
-                          <NumberField label="Distance from frame end" value={single.offset + len / 2} min={5} max={len - 5} step={step} onChange={(v) => updatePart(single.id, { offset: v - len / 2 })} />
-                          <em>mm</em>
-                        </label>
-                      </>
-                    );
-                  })()}
-                  {single.kind === "bracket" && (() => {
-                    const host = rail(project.parts, single.a);
-                    const f = bracketFrame(single, project.parts);
-                    if (!host || !f) return null;
-                    const ia = ai(host.axis);
-                    const fromEnd = round(f.origin[ia] - (host.p[ia] - host.length / 2));
-                    return (
-                      <>
-                        <div className="prop">
-                          <span>On</span>
-                          <button className="link" onClick={() => setSelection([host.id])}>{host.label}</button>
-                        </div>
-                        <label className="prop">
-                          <span>Face</span>
-                          <select
-                            aria-label="Bracket face"
-                            value={`${single.sign},${single.face}`}
-                            disabled={single.locked}
-                            onChange={(e) => {
-                              const [sign, face] = e.target.value.split(",");
-                              setBracketFace(single, face as Axis, Number(sign));
-                            }}
-                          >
-                            {axes
-                              .filter((a) => a !== host.axis)
-                              .flatMap((a) =>
-                                [1, -1].map((s) => (
-                                  <option key={`${s}${a}`} value={`${s},${a}`}>
-                                    {a === "y" ? (s > 0 ? "Top" : "Bottom") : `${s > 0 ? "+" : "−"}${a.toUpperCase()} side`}
-                                  </option>
-                                )),
-                              )}
-                          </select>
-                        </label>
-                        <label className="prop" title="Inside corner, measured from the frame's low-coordinate end">
-                          <span>From end</span>
-                          {single.b ? (
-                            <span className="value">{fromEnd} mm · follows {rail(project.parts, single.b)?.label}</span>
-                          ) : (
-                            <>
-                              <NumberField
-                                label="Bracket corner from frame end"
-                                value={fromEnd}
-                                step={step}
-                                onChange={(v) => {
-                                  const offset = round(v - host.length / 2);
-                                  const next = { ...single, offset };
-                                  if (!bracketOk(next, project.parts)) return notify("That would put the leg off the frame");
-                                  replaceBracket(single, next);
-                                }}
-                              />
-                              <em>mm</em>
-                            </>
-                          )}
-                        </label>
-                        <div className="prop">
-                          <span>Joins</span>
-                          {single.b ? (
-                            <button className="link" onClick={() => setSelection([single.b])}>{rail(project.parts, single.b)?.label}</button>
-                          ) : (
-                            <span className="value muted">nothing yet — slide it against a frame</span>
-                          )}
-                        </div>
-                        <div className="prop">
-                          <span>Type</span>
-                          <span className="value">{bracketType(single, project.parts) === "stacked" ? "Holes near corner (stacked)" : "Standard 90°"}</span>
-                        </div>
-                        <div className="prop-actions">
-                          <button className="mini" disabled={single.locked} onClick={() => rotateBracket(single)}>Rotate 90° (R)</button>
-                          {single.b && (
-                            <button className="mini" disabled={single.locked} onClick={() => release(single)}>Let go of {rail(project.parts, single.b)?.label}</button>
-                          )}
-                        </div>
-                      </>
-                    );
-                  })()}
-                </>
-              ) : selection.length ? (
-                <>
-                  <div className="prop">
-                    <span>Contains</span>
-                    <span className="value">
-                      {[
-                        [selRails.length, "frame"],
-                        [selected.filter((p) => p.kind === "bracket").length, "bracket"],
-                        [selected.filter((p) => p.kind === "nut").length, "T-nut"],
-                      ]
-                        .filter(([n]) => n)
-                        .map(([n, w]) => `${n} ${w}${n === 1 ? "" : "s"}`)
-                        .join(", ")}
-                    </span>
-                  </div>
-                  <div className="prop-actions">
-                    <button className="mini" onClick={() => setSelection(connectedIds(project.parts, selection))}>Select connected</button>
-                    <button className="mini" onClick={() => alter((p) => (p.locked = !allLocked))}>{allLocked ? "Unlock" : "Lock"}</button>
-                    {selRails.length >= 2 && (
-                      <button className="mini" onClick={(e) => setContext({ x: e.clientX, y: e.clientY, items: [
-                        { label: "Align centers", sub: axisSub((a) => spatial("align", a), false) },
-                        { label: "Space evenly", sub: axisSub((a) => spatial("distribute", a), selRails.length < 3), disabled: selRails.length < 3 },
-                      ] })}>Arrange ▾</button>
-                    )}
-                  </div>
+                  <strong>W A S D</strong> move{" "}
+                  <span>
+                    · Q / E down / up · Shift faster · right-drag look
+                  </span>
                 </>
               ) : (
                 <>
-                  <label className="prop">
-                    <span>Name</span>
-                    <input value={project.name} maxLength={120} onChange={(e) => commit({ ...project, name: e.target.value })} />
-                  </label>
-                  <div className="prop-label">Overall size</div>
-                  <div className="xyz readout">
-                    {axes.map((a, i) => (
-                      <div key={a}>
-                        <AxisLetter a={a} />
-                        <span>{bb.size[i]}</span>
-                      </div>
-                    ))}
-                  </div>
+                  <strong>Drag to orbit</strong>
+                  <span>
+                    {" "}
+                    · middle or right mouse · Shift + drag to pan · scroll to
+                    zoom
+                  </span>
                 </>
               )}
             </div>
-          </Section>
-
-          <Section
-            title="Parts list"
-            open={open.bom}
-            onToggle={() => toggle("bom")}
-            extra={
-              <button className="mini" title="Download as CSV spreadsheet" onClick={() => exportFile("csv")}>
-                CSV
+            {workspace === "guide" && guideSteps[activeGuideIndex] && (
+              <div className="guide-scene-tag">
+                <span>{String(activeGuideIndex + 1).padStart(2, "0")}</span>
+                <div>
+                  <small>{guideSteps[activeGuideIndex].phase}</small>
+                  <strong>{guideSteps[activeGuideIndex].title}</strong>
+                </div>
+              </div>
+            )}
+            {webglError && <div className="webgl-error">{webglError}</div>}
+            {!project.parts.length &&
+              !project.references?.length &&
+              !placement &&
+              workspace === "frame" && (
+                <div className="empty">
+                  Drag a frame up from the shelf below
+                </div>
+              )}
+            {measure !== null && (
+              <div className="measure-tag">{round(measure)} mm</div>
+            )}
+          </div>
+          {workspace === "frame" && (
+            <div className="shelf" aria-label="Parts">
+              <div className="shelf-group">
+                <div className="shelf-label">
+                  Frames <span>20 × 20 mm</span>
+                </div>
+                <div className="shelf-row">
+                  {project.presets.map((length) => (
+                    <div
+                      key={length}
+                      className={`tile ${placement?.kind === "rail" && placement.length === length ? "sel" : ""}`}
+                      onPointerDown={(e) => shelfDrag(e, "rail", length)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setContext({
+                          x: e.clientX,
+                          y: e.clientY,
+                          items: [
+                            {
+                              label: "Remove from shelf",
+                              disabled: project.presets.length < 2,
+                              action: () =>
+                                commit({
+                                  ...project,
+                                  presets: project.presets.filter(
+                                    (x) => x !== length,
+                                  ),
+                                }),
+                            },
+                          ],
+                        });
+                      }}
+                      title="Drag into the view, or click then click in the view"
+                    >
+                      <RailGlyph length={length} max={maxPreset} />
+                      <span className="tile-name">{cm(length)}</span>
+                    </div>
+                  ))}
+                  <div
+                    className="tile add"
+                    onClick={() => setModal("part")}
+                    title="Add another frame length"
+                  >
+                    <span className="plus">+</span>
+                    <span className="tile-name">Other length</span>
+                  </div>
+                </div>
+              </div>
+              <div className="shelf-group">
+                <div className="shelf-label">Points</div>
+                <div className="shelf-col">
+                  <Seg
+                    value={placement?.kind === "rail" ? placement.axis : axis}
+                    title="Direction new frames point (R)"
+                    options={axes.map((a) => ({
+                      value: a,
+                      label: <AxisLetter a={a} />,
+                      title:
+                        a === "y"
+                          ? "Upright (Y)"
+                          : `Flat along ${a.toUpperCase()}`,
+                    }))}
+                    onChange={(a) => {
+                      setAxis(a);
+                      if (placement?.kind === "rail")
+                        setPlacement({ ...placement, axis: a });
+                    }}
+                  />
+                  <label
+                    className="check-row"
+                    title="Stay in placing mode after each drop"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={repeat}
+                      onChange={(e) => setRepeat(e.target.checked)}
+                    />
+                    Keep placing
+                  </label>
+                </div>
+              </div>
+              <div className="shelf-group">
+                <div className="shelf-label">Hardware</div>
+                <div className="shelf-row">
+                  {(
+                    [
+                      [
+                        "bracket",
+                        "Bracket 90°",
+                        <BracketGlyph />,
+                        "Drop where two frames meet",
+                      ],
+                      [
+                        "nut",
+                        "T-nut",
+                        <NutGlyph />,
+                        "Drop on any frame face — for mounting things",
+                      ],
+                    ] as const
+                  ).map(([kind, name, glyph, tip]) => (
+                    <div
+                      key={kind}
+                      className={`tile ${placement?.kind === kind ? "sel" : ""}`}
+                      onPointerDown={(e) => shelfDrag(e, kind)}
+                      title={tip}
+                    >
+                      {glyph}
+                      <span className="tile-name">{name}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+          {workspace !== "frame" && (
+            <div className="mode-footer">
+              {workspace === "fit"
+                ? "Drag an object or its arrows to move it · set exact dimensions in the panel · frames remain editable"
+                : "Watch the action, then check the Rest / Hold / Secure instructions before moving on"}
+              <span className="flex" />
+              <button onClick={() => switchWorkspace("frame")}>
+                Back to Frame
               </button>
-            }
-          >
-            <table className="bom">
-              <tbody>
-                {rows.map((r, i) => (
-                  <tr key={i}>
-                    <td className="qty">{r.qty}×</td>
-                    <td>
-                      {r.item === "T-slot frame" ? `Frame ${cm(Number(r.spec.split("×").pop()!.replace(/[^\d.]/g, "")))}` : r.item}
-                      {r.item !== "T-slot frame" && r.spec && <small>{r.spec.replace("Bracket connections", "for brackets").replace("Independent mounting points", "mounting")}</small>}
-                    </td>
-                  </tr>
-                ))}
-                {!rows.length && (
-                  <tr>
-                    <td className="muted" colSpan={2}>No parts yet</td>
-                  </tr>
+            </div>
+          )}
+        </main>
+
+        {/* ---- Right column ---- */}
+        {workspace === "fit" ? (
+          <ReferencePanel
+            project={project}
+            selected={reference}
+            select={selectReference}
+            add={addReference}
+            update={updateReference}
+            remove={removeReference}
+            duplicate={duplicateReference}
+            importFile={() => modelFile.current?.click()}
+            units={importUnits}
+            setUnits={setImportUnits}
+            focus={() => viewport.current?.fit(true)}
+          />
+        ) : workspace === "guide" ? (
+          <BuildGuide
+            project={project}
+            steps={guideSteps}
+            index={activeGuideIndex}
+            setIndex={setGuideIndex}
+            focus={() => viewport.current?.focusGuide()}
+            overview={() => viewport.current?.fit()}
+            finish={() => switchWorkspace("frame")}
+            print={() => exportFile("guide")}
+            playing={guidePlaying}
+            onPlayingChange={setGuidePlaying}
+            replay={() => {
+              setGuideReplay((n) => n + 1);
+              setGuidePlaying(true);
+            }}
+          />
+        ) : (
+          <aside className="panel right">
+            <Section
+              title="Outliner"
+              grow
+              open={open.outliner}
+              onToggle={() => toggle("outliner")}
+            >
+              <div className="tree" role="listbox" aria-multiselectable="true">
+                {(
+                  [
+                    ["rail", "Frames"],
+                    ["bracket", "Brackets"],
+                    ["nut", "T-nuts"],
+                  ] as const
+                ).map(([kind, name]) => {
+                  const count = project.parts.filter(
+                    (p) => p.kind === kind,
+                  ).length;
+                  if (!count) return null;
+                  return (
+                    <React.Fragment key={kind}>
+                      <div
+                        className="tree-row branch"
+                        onClick={() => toggle(kind)}
+                      >
+                        {open[kind] ? (
+                          <ChevronDown size={11} />
+                        ) : (
+                          <ChevronRight size={11} />
+                        )}
+                        <span className="name">{name}</span>
+                        <span className="desc">{count}</span>
+                      </div>
+                      {open[kind] && railRows(kind)}
+                    </React.Fragment>
+                  );
+                })}
+                {!project.parts.length && (
+                  <div className="tree-empty">Nothing yet</div>
                 )}
-              </tbody>
-            </table>
-            <div className="bom-foot">
-              <span>Total length</span>
-              <b>{totalLength} m</b>
-            </div>
-            <label className="bom-foot" title="How many screws and T-nuts hold each leg of a bracket">
-              <span>Screws per bracket leg</span>
-              <select aria-label="Screws per bracket leg" value={project.fastenersPerSide} onChange={(e) => commit({ ...project, fastenersPerSide: Number(e.target.value) })}>
-                {[1, 2, 3, 4].map((n) => (
-                  <option key={n}>{n}</option>
-                ))}
-              </select>
-            </label>
-            <div className="checks">
-              {checks.length ? (
-                checks.map((c, i) => (
-                  <button key={i} className="issue" onClick={() => setSelection(c.ids)} title="Click to select">
-                    ⚠ {c.text}
-                  </button>
-                ))
-              ) : project.parts.length ? (
-                <span className="ok">✓ No overlaps or loose frames</span>
-              ) : null}
-            </div>
-          </Section>
-        </aside>
+              </div>
+            </Section>
+
+            <Section
+              title={
+                single
+                  ? `${single.label} · ${single.kind === "rail" ? "Frame" : single.kind === "nut" ? "T-nut" : "Bracket"}`
+                  : selection.length
+                    ? `${selection.length} selected`
+                    : "Frame"
+              }
+              open={open.properties}
+              onToggle={() => toggle("properties")}
+            >
+              <div className="props">
+                {single ? (
+                  <>
+                    {single.locked && (
+                      <div className="locked-bar">
+                        <Lock size={11} /> Locked
+                        <button
+                          className="mini"
+                          onClick={() => updateLock(single.id, false)}
+                        >
+                          Unlock
+                        </button>
+                      </div>
+                    )}
+                    <label className="prop">
+                      <span>Name</span>
+                      <input
+                        value={single.label}
+                        maxLength={80}
+                        disabled={single.locked}
+                        onChange={(e) =>
+                          updatePart(single.id, { label: e.target.value })
+                        }
+                      />
+                    </label>
+                    {single.kind === "rail" && (
+                      <>
+                        <label className="prop">
+                          <span>Length</span>
+                          <NumberField
+                            label="Frame length"
+                            value={single.length}
+                            min={40}
+                            step={step}
+                            onChange={(v) =>
+                              updatePart(single.id, { length: v })
+                            }
+                          />
+                          <em>mm</em>
+                        </label>
+                        <div className="prop">
+                          <span>Points</span>
+                          <Seg
+                            value={single.axis}
+                            disabled={single.locked}
+                            options={axes.map((a) => ({
+                              value: a,
+                              label: <AxisLetter a={a} />,
+                            }))}
+                            onChange={(a) => updatePart(single.id, { axis: a })}
+                          />
+                        </div>
+                        <div className="prop-label">Center</div>
+                        <div className="xyz">
+                          {axes.map((a, i) => (
+                            <label key={a}>
+                              <AxisLetter a={a} />
+                              <NumberField
+                                label={`Center ${a.toUpperCase()}`}
+                                value={single.p[i]}
+                                step={step}
+                                onChange={(v) => {
+                                  const delta: Vec = [0, 0, 0];
+                                  delta[i] = v - single.p[i];
+                                  const r = moveParts(
+                                    project,
+                                    selection,
+                                    delta,
+                                  );
+                                  r.error ? notify(r.error) : commit(r.project);
+                                }}
+                              />
+                            </label>
+                          ))}
+                        </div>
+                        <div className="prop-actions">
+                          <button
+                            className="mini"
+                            onClick={() =>
+                              setSelection(
+                                connectedIds(project.parts, selection),
+                              )
+                            }
+                          >
+                            Select connected
+                          </button>
+                          <button
+                            className="mini"
+                            onClick={() => detach(single)}
+                          >
+                            Detach
+                          </button>
+                        </div>
+                      </>
+                    )}
+                    {single.kind === "nut" &&
+                      (() => {
+                        const r = rail(project.parts, single.rail);
+                        const len = r?.length || 0;
+                        return (
+                          <>
+                            <div className="prop">
+                              <span>On frame</span>
+                              <button
+                                className="link"
+                                onClick={() => setSelection([single.rail])}
+                              >
+                                {r?.label}
+                              </button>
+                            </div>
+                            <label className="prop">
+                              <span>Face</span>
+                              <select
+                                aria-label="T-nut face"
+                                value={`${single.sign},${single.face}`}
+                                disabled={single.locked}
+                                onChange={(e) => {
+                                  const [sign, face] =
+                                    e.target.value.split(",");
+                                  updatePart(single.id, {
+                                    sign: Number(sign),
+                                    face: face as Axis,
+                                  });
+                                }}
+                              >
+                                {axes
+                                  .filter((a) => a !== r?.axis)
+                                  .flatMap((a) =>
+                                    [1, -1].map((s) => (
+                                      <option
+                                        key={`${s}${a}`}
+                                        value={`${s},${a}`}
+                                      >
+                                        {a === "y"
+                                          ? s > 0
+                                            ? "Top"
+                                            : "Bottom"
+                                          : `${s > 0 ? "+" : "−"}${a.toUpperCase()} side`}
+                                      </option>
+                                    )),
+                                  )}
+                              </select>
+                            </label>
+                            <label
+                              className="prop"
+                              title="Measured from the frame's low-coordinate end"
+                            >
+                              <span>From end</span>
+                              <NumberField
+                                label="Distance from frame end"
+                                value={single.offset + len / 2}
+                                min={5}
+                                max={len - 5}
+                                step={step}
+                                onChange={(v) =>
+                                  updatePart(single.id, { offset: v - len / 2 })
+                                }
+                              />
+                              <em>mm</em>
+                            </label>
+                          </>
+                        );
+                      })()}
+                    {single.kind === "bracket" &&
+                      (() => {
+                        const host = rail(project.parts, single.a);
+                        const f = bracketFrame(single, project.parts);
+                        if (!host || !f) return null;
+                        const ia = ai(host.axis);
+                        const fromEnd = round(
+                          f.origin[ia] - (host.p[ia] - host.length / 2),
+                        );
+                        return (
+                          <>
+                            <div className="prop">
+                              <span>On</span>
+                              <button
+                                className="link"
+                                onClick={() => setSelection([host.id])}
+                              >
+                                {host.label}
+                              </button>
+                            </div>
+                            <label className="prop">
+                              <span>Face</span>
+                              <select
+                                aria-label="Bracket face"
+                                value={`${single.sign},${single.face}`}
+                                disabled={single.locked}
+                                onChange={(e) => {
+                                  const [sign, face] =
+                                    e.target.value.split(",");
+                                  setBracketFace(
+                                    single,
+                                    face as Axis,
+                                    Number(sign),
+                                  );
+                                }}
+                              >
+                                {axes
+                                  .filter((a) => a !== host.axis)
+                                  .flatMap((a) =>
+                                    [1, -1].map((s) => (
+                                      <option
+                                        key={`${s}${a}`}
+                                        value={`${s},${a}`}
+                                      >
+                                        {a === "y"
+                                          ? s > 0
+                                            ? "Top"
+                                            : "Bottom"
+                                          : `${s > 0 ? "+" : "−"}${a.toUpperCase()} side`}
+                                      </option>
+                                    )),
+                                  )}
+                              </select>
+                            </label>
+                            <label
+                              className="prop"
+                              title="Inside corner, measured from the frame's low-coordinate end"
+                            >
+                              <span>From end</span>
+                              {single.b ? (
+                                <span className="value">
+                                  {fromEnd} mm · follows{" "}
+                                  {rail(project.parts, single.b)?.label}
+                                </span>
+                              ) : (
+                                <>
+                                  <NumberField
+                                    label="Bracket corner from frame end"
+                                    value={fromEnd}
+                                    step={step}
+                                    onChange={(v) => {
+                                      const offset = round(v - host.length / 2);
+                                      const next = { ...single, offset };
+                                      if (!bracketOk(next, project.parts))
+                                        return notify(
+                                          "That would put the leg off the frame",
+                                        );
+                                      replaceBracket(single, next);
+                                    }}
+                                  />
+                                  <em>mm</em>
+                                </>
+                              )}
+                            </label>
+                            <div className="prop">
+                              <span>Joins</span>
+                              {single.b ? (
+                                <button
+                                  className="link"
+                                  onClick={() => setSelection([single.b])}
+                                >
+                                  {rail(project.parts, single.b)?.label}
+                                </button>
+                              ) : (
+                                <span className="value muted">
+                                  nothing yet — slide it against a frame
+                                </span>
+                              )}
+                            </div>
+                            <div className="prop">
+                              <span>Type</span>
+                              <span className="value">
+                                {bracketType(single, project.parts) ===
+                                "stacked"
+                                  ? "Holes near corner (stacked)"
+                                  : "Standard 90°"}
+                              </span>
+                            </div>
+                            <div className="prop-actions">
+                              <button
+                                className="mini"
+                                disabled={single.locked}
+                                onClick={() => rotateBracket(single)}
+                              >
+                                Rotate 90° (R)
+                              </button>
+                              {single.b && (
+                                <button
+                                  className="mini"
+                                  disabled={single.locked}
+                                  onClick={() => release(single)}
+                                >
+                                  Let go of{" "}
+                                  {rail(project.parts, single.b)?.label}
+                                </button>
+                              )}
+                            </div>
+                          </>
+                        );
+                      })()}
+                  </>
+                ) : selection.length ? (
+                  <>
+                    <div className="prop">
+                      <span>Contains</span>
+                      <span className="value">
+                        {[
+                          [selRails.length, "frame"],
+                          [
+                            selected.filter((p) => p.kind === "bracket").length,
+                            "bracket",
+                          ],
+                          [
+                            selected.filter((p) => p.kind === "nut").length,
+                            "T-nut",
+                          ],
+                        ]
+                          .filter(([n]) => n)
+                          .map(([n, w]) => `${n} ${w}${n === 1 ? "" : "s"}`)
+                          .join(", ")}
+                      </span>
+                    </div>
+                    <div className="prop-actions">
+                      <button
+                        className="mini"
+                        onClick={() =>
+                          setSelection(connectedIds(project.parts, selection))
+                        }
+                      >
+                        Select connected
+                      </button>
+                      <button
+                        className="mini"
+                        onClick={() => alter((p) => (p.locked = !allLocked))}
+                      >
+                        {allLocked ? "Unlock" : "Lock"}
+                      </button>
+                      {selRails.length >= 2 && (
+                        <button
+                          className="mini"
+                          onClick={(e) =>
+                            setContext({
+                              x: e.clientX,
+                              y: e.clientY,
+                              items: [
+                                {
+                                  label: "Align centers",
+                                  sub: axisSub(
+                                    (a) => spatial("align", a),
+                                    false,
+                                  ),
+                                },
+                                {
+                                  label: "Space evenly",
+                                  sub: axisSub(
+                                    (a) => spatial("distribute", a),
+                                    selRails.length < 3,
+                                  ),
+                                  disabled: selRails.length < 3,
+                                },
+                              ],
+                            })
+                          }
+                        >
+                          Arrange ▾
+                        </button>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <label className="prop">
+                      <span>Name</span>
+                      <input
+                        value={project.name}
+                        maxLength={120}
+                        onChange={(e) =>
+                          commit({ ...project, name: e.target.value })
+                        }
+                      />
+                    </label>
+                    <div className="prop-label">Overall size</div>
+                    <div className="xyz readout">
+                      {axes.map((a, i) => (
+                        <div key={a}>
+                          <AxisLetter a={a} />
+                          <span>{bb.size[i]}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            </Section>
+
+            <Section
+              title="Parts list"
+              open={open.bom}
+              onToggle={() => toggle("bom")}
+              extra={
+                <button
+                  className="mini"
+                  title="Download as CSV spreadsheet"
+                  onClick={() => exportFile("csv")}
+                >
+                  CSV
+                </button>
+              }
+            >
+              <table className="bom">
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={i}>
+                      <td className="qty">{r.qty}×</td>
+                      <td>
+                        {r.item === "T-slot frame"
+                          ? `Frame ${cm(
+                              Number(
+                                r.spec
+                                  .split("×")
+                                  .pop()!
+                                  .replace(/[^\d.]/g, ""),
+                              ),
+                            )}`
+                          : r.item}
+                        {r.item !== "T-slot frame" && r.spec && (
+                          <small>
+                            {r.spec
+                              .replace("Bracket connections", "for brackets")
+                              .replace(
+                                "Independent mounting points",
+                                "mounting",
+                              )}
+                          </small>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {!rows.length && (
+                    <tr>
+                      <td className="muted" colSpan={2}>
+                        No parts yet
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+              <div className="bom-foot">
+                <span>Total length</span>
+                <b>{totalLength} m</b>
+              </div>
+              <label
+                className="bom-foot"
+                title="How many screws and T-nuts hold each leg of a bracket"
+              >
+                <span>Screws per bracket leg</span>
+                <select
+                  aria-label="Screws per bracket leg"
+                  value={project.fastenersPerSide}
+                  onChange={(e) =>
+                    commit({
+                      ...project,
+                      fastenersPerSide: Number(e.target.value),
+                    })
+                  }
+                >
+                  {[1, 2, 3, 4].map((n) => (
+                    <option key={n}>{n}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="checks">
+                {checks.length ? (
+                  checks.map((c, i) => (
+                    <button
+                      key={i}
+                      className="issue"
+                      onClick={() => setSelection(c.ids)}
+                      title="Click to select"
+                    >
+                      ⚠ {c.text}
+                    </button>
+                  ))
+                ) : project.parts.length ? (
+                  <span className="ok">✓ No overlaps or loose frames</span>
+                ) : null}
+              </div>
+            </Section>
+          </aside>
+        )}
       </div>
 
       <footer className="statusbar">
-        <span className="status-msg">{message || hint}</span>
-        <span className="status-cell">{selection.length ? `${selection.length} selected` : `${project.parts.length} parts`}</span>
+        <span className="status-msg" role="status">
+          {message ||
+            (workspace === "guide"
+              ? "Build guide · use Next step to advance"
+              : hint)}
+        </span>
+        {recoveryFailed && (
+          <span
+            className="recovery-warning"
+            title="Browser storage is full. Save the project file to keep your work."
+          >
+            Save a .glowframe backup
+          </span>
+        )}
+        <span className="status-cell">
+          {selection.length
+            ? `${selection.length} selected`
+            : `${project.parts.length} parts`}
+        </span>
         <span className="status-cell">{bb.size.join(" × ")} mm</span>
-        <span className="status-cell">{rails.length} frames · {totalLength} m</span>
+        <span className="status-cell">
+          {rails.length} frames · {totalLength} m
+        </span>
       </footer>
 
-      <input ref={file} type="file" accept=".glowframe,.json" hidden onChange={load} />
+      <input
+        ref={file}
+        type="file"
+        accept=".glowframe,.json"
+        hidden
+        onChange={load}
+      />
+      <input
+        ref={modelFile}
+        type="file"
+        accept=".stl,.obj"
+        aria-label="Import model file"
+        hidden
+        onChange={loadModel}
+      />
 
       {context && (
-        <div className="context-layer" onMouseDown={() => setContext(null)} onContextMenu={(e) => { e.preventDefault(); setContext(null); }}>
+        <div
+          className="context-layer"
+          onMouseDown={() => setContext(null)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setContext(null);
+          }}
+        >
           <div onMouseDown={(e) => e.stopPropagation()}>
             <MenuList
               items={context.items}
               onDone={() => setContext(null)}
-              style={{ position: "fixed", left: Math.min(context.x, window.innerWidth - 200), top: Math.min(context.y, window.innerHeight - 240) }}
+              style={{
+                position: "fixed",
+                left: Math.min(context.x, window.innerWidth - 200),
+                top: Math.min(context.y, window.innerHeight - 240),
+              }}
             />
           </div>
         </div>
@@ -1720,12 +2766,20 @@ function App() {
 
       {modal === "part" && (
         <Dialog title="Add frame length" onClose={() => setModal(null)}>
-          <NewPart project={project} onCommit={commit} onClose={() => setModal(null)} />
+          <NewPart
+            project={project}
+            onCommit={commit}
+            onClose={() => setModal(null)}
+          />
         </Dialog>
       )}
       {modal === "step" && (
         <Dialog title="Step size" onClose={() => setModal(null)}>
-          <CustomStep step={step} onStep={setStep} onClose={() => setModal(null)} />
+          <CustomStep
+            step={step}
+            onStep={setStep}
+            onClose={() => setModal(null)}
+          />
         </Dialog>
       )}
       {modal === "help" && (
@@ -1746,6 +2800,22 @@ function App() {
                   ["Rotate a frame / turn a bracket", "R"],
                   ["Look around", "Hold right mouse and drag"],
                   ["Fly", "W A S D · Q/E down/up · Shift faster"],
+                  [
+                    "Orbit mode (View menu)",
+                    "Middle/right-drag orbit · Shift+drag pan",
+                  ],
+                  [
+                    "View cube",
+                    "Drag to orbit · click faces, edges or corners",
+                  ],
+                  [
+                    "Physical ruler",
+                    "Drag to move · pull round end to extend · edit length in Fit check",
+                  ],
+                  [
+                    "Import / export models",
+                    "STL / OBJ in · STL out · millimeters by default",
+                  ],
                   ["Pan / zoom", "Shift+right-drag / wheel"],
                   ["Views", "0 persp · 7 top · 1 front · 3 right"],
                   ["Zoom to selection / all", "F / Home"],
@@ -1759,7 +2829,10 @@ function App() {
                 ))}
               </tbody>
             </table>
-            <p className="note">Save writes a .glowframe file to your downloads. Your latest work is also kept in this browser in case the tab closes.</p>
+            <p className="note">
+              Save writes a .glowframe file to your downloads. Your latest work
+              is also kept in this browser in case the tab closes.
+            </p>
           </div>
         </Dialog>
       )}
@@ -1794,9 +2867,14 @@ function NewPart({
           mm = Math.round(c * 10);
         if (!length.trim() || !Number.isFinite(c) || mm < 40 || mm > 100000)
           return setError("Use a length between 4 and 10,000 cm.");
-        if (project.presets.includes(mm)) return setError("That length is already in the list.");
-        if (project.presets.length >= 30) return setError("The list holds up to 30 lengths.");
-        onCommit({ ...project, presets: [...project.presets, mm].sort((a, b) => a - b) });
+        if (project.presets.includes(mm))
+          return setError("That length is already in the list.");
+        if (project.presets.length >= 30)
+          return setError("The list holds up to 30 lengths.");
+        onCommit({
+          ...project,
+          presets: [...project.presets, mm].sort((a, b) => a - b),
+        });
         onClose();
       }}
     >
@@ -1854,7 +2932,16 @@ function CustomStep({
     >
       <label className="prop">
         <span>Step</span>
-        <input autoFocus aria-label="Custom step" type="number" min="0.1" max="1000" step="0.1" value={value} onChange={(e) => setValue(e.target.value)} />
+        <input
+          autoFocus
+          aria-label="Custom step"
+          type="number"
+          min="0.1"
+          max="1000"
+          step="0.1"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+        />
         <em>mm</em>
       </label>
       {!ok && <p className="error">Use a step between 0.1 and 1000 mm.</p>}

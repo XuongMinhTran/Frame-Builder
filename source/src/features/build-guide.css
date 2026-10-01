@@ -1,0 +1,311 @@
+.feature-panel.build-panel {
+  width: 350px;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+  background: #343a40;
+}
+
+.build-panel > .build-guide-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 20px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 17px;
+  scrollbar-gutter: stable;
+}
+
+.build-guide-scroll > * {
+  flex-shrink: 0;
+}
+
+.build-panel .guide-progress-label {
+  margin-top: 13px;
+}
+
+.guide-bench-card {
+  border: 1px solid #5a6f7a;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #374750;
+}
+
+.guide-bench-heading {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  color: #d3e2ee;
+  background: #40535f;
+}
+
+.guide-bench-heading > svg {
+  flex-shrink: 0;
+}
+
+.guide-bench-heading > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.guide-bench-heading span {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  color: #b5c9d9;
+}
+
+.guide-bench-heading strong {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.guide-support-list {
+  padding: 0 12px;
+  margin: 0;
+}
+
+.guide-support-list > div {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 9px;
+  padding: 10px 0;
+  border-bottom: 1px solid #4c5d67;
+}
+
+.guide-support-list > div:last-child {
+  border-bottom: 0;
+}
+
+.guide-support-list dt {
+  font-size: 11px;
+  line-height: 1.65;
+  font-weight: 700;
+  color: #d8e6ef;
+}
+
+.guide-support-list dd {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.65;
+  color: #c8d4dc;
+}
+
+.guide-support-note {
+  margin: 0;
+  padding: 0 12px 11px;
+  color: #a8becd;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.guide-mount-details {
+  padding: 10px 11px;
+  border: 1px solid #53616b;
+  border-radius: 5px;
+}
+
+.guide-mount-details summary {
+  font-size: 11px;
+  line-height: 1.6;
+  font-weight: 600;
+  color: #d2dce5;
+  cursor: pointer;
+}
+
+.guide-mount-details[open] > summary {
+  margin-bottom: 10px;
+}
+
+.guide-mount-details table {
+  table-layout: fixed;
+}
+
+.guide-mount-details th:first-child {
+  width: 49%;
+}
+
+.guide-mount-details td:first-child {
+  overflow-wrap: anywhere;
+}
+
+.guide-scene-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  color: #c1ccd5;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.guide-scene-legend > span {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.guide-scene-legend i {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border: 1px solid #d7e0e6;
+  border-radius: 2px;
+  background: #c4cdd4;
+}
+
+.guide-scene-legend .guide-legend-transparent {
+  opacity: 0.55;
+}
+
+.guide-scene-legend p {
+  margin: 0 0 0 18px;
+  color: #a9b9c6;
+}
+
+.guide-camera-note kbd {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 3px;
+  margin-right: 3px;
+  border: 1px solid #687681;
+  border-radius: 3px;
+  font: 10px/1.55 monospace;
+  text-align: center;
+  color: #d0dbe4;
+}
+
+.build-guide-footer {
+  flex-shrink: 0;
+  padding: 12px 17px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-top: 1px solid #566570;
+  background: #2d363d;
+  box-shadow: 0 -4px 14px #22282e33;
+}
+
+.guide-motion-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.guide-motion-label {
+  font-size: 10px;
+  color: #afc3d2;
+}
+
+.build-guide-footer .feature-button {
+  font-size: 11px;
+}
+
+.build-guide-footer .guide-navigation {
+  gap: 7px;
+}
+
+@media (max-width: 1150px) {
+  .feature-panel.build-panel {
+    width: 310px;
+  }
+  .build-panel > .build-guide-scroll {
+    padding: 17px 14px;
+  }
+  .build-guide-footer {
+    padding: 10px 14px 12px;
+  }
+}
+
+@media (max-width: 760px) {
+  .feature-panel.build-panel {
+    width: 290px;
+  }
+  .build-panel > .build-guide-scroll {
+    padding: 15px 12px;
+  }
+  .build-guide-footer {
+    padding: 9px 12px 11px;
+    gap: 9px;
+  }
+  .guide-support-list > div {
+    grid-template-columns: 37px minmax(0, 1fr);
+    gap: 7px;
+  }
+}
+
+@media (max-width: 560px) {
+  .feature-panel.build-panel {
+    width: 100%;
+    height: 42vh;
+    max-height: 42vh;
+  }
+  .build-guide-footer {
+    padding: 8px 12px;
+  }
+  .guide-motion-controls {
+    flex-direction: row;
+    align-items: center;
+  }
+  .guide-motion-controls .feature-buttons {
+    flex: 1;
+  }
+  .guide-motion-label {
+    width: 105px;
+    flex-shrink: 0;
+  }
+}
+/* The inset shares the live 3D scene; only its caption and border are HTML. */
+.hardware-inset {
+  position: absolute;
+  z-index: 4;
+  pointer-events: none;
+  border: 1px solid #9cb2bd;
+  border-radius: 5px;
+  box-shadow: 0 4px 14px #151d2759;
+  overflow: hidden;
+}
+.hardware-inset > span,
+.hardware-inset > small {
+  position: absolute;
+  left: 0;
+  right: 0;
+  padding: 6px 8px;
+  background: #202c35d9;
+  color: #e0ecf2;
+  font-size: 10px;
+}
+.hardware-inset > span {
+  top: 0;
+  letter-spacing: 1px;
+  font-size: 9px;
+}
+.hardware-inset > small {
+  bottom: 0;
+  line-height: 1.4;
+}
+.bench-animation-status {
+  position: absolute;
+  left: 112px;
+  right: 14px;
+  bottom: 35px;
+  color: #f0e5ce;
+  text-shadow: 0 1px 4px #191f25;
+  font-size: 11px;
+  text-align: center;
+  pointer-events: none;
+}
+.hardware-inset[hidden],
+.bench-animation-status[hidden] {
+  display: none !important;
+}
+@media (max-width: 800px) {
+  .bench-animation-status {
+    left: 12px;
+    font-size: 10px;
+  }
+}

@@ -3,6 +3,8 @@ import {
   clearanceConflicts,
   newClearanceError,
 } from "./clearance.ts";
+import { MAX_PROJECT_BYTES, validateReferences } from "./references.ts";
+import type { ReferenceObject } from "./references.ts";
 export type Axis = "x" | "y" | "z";
 export type Vec = [number, number, number];
 export const axes: Axis[] = ["x", "y", "z"];
@@ -52,6 +54,7 @@ export type Project = {
   presets: number[];
   parts: Part[];
   fastenersPerSide: number;
+  references?: ReferenceObject[];
 };
 export type BillRow = { item: string; spec: string; qty: number; ids: string };
 export const uid = () => crypto.randomUUID();
@@ -290,7 +293,9 @@ const sameSpot = (x: Bracket, y: Bracket, parts: Part[]) => {
 };
 /** Middle of the bracket's footprint along its frame. */
 const centerAlong = (f: Frame, a: Rail) =>
-  f.u[0] === ai(a.axis) ? f.origin[ai(a.axis)] + f.u[1] * 15 : f.origin[ai(a.axis)];
+  f.u[0] === ai(a.axis)
+    ? f.origin[ai(a.axis)] + f.u[1] * 15
+    : f.origin[ai(a.axis)];
 /** Where a bracket goes on frame `a`, face `face`/`sign`, with the cursor at
  * `point`. With `join` it snaps into a joint within `reach` mm; otherwise it
  * sits at the cursor, kept on the frame. `orient` (0-3, see ORIENTS) fixes
@@ -309,7 +314,9 @@ export function bracketAt(
     id?: string;
     label?: string;
   },
-): { bracket: Bracket; error?: undefined } | { bracket?: undefined; error: string } {
+):
+  | { bracket: Bracket; error?: undefined }
+  | { bracket?: undefined; error: string } {
   const ia = ai(a.axis),
     n = ai(face);
   if (n === ia) return { error: "Point at a side of the frame" };
@@ -317,7 +324,9 @@ export function bracketAt(
   const id = opts.id || uid(),
     label = opts.label || nextLabel(parts, "bracket");
   const orients =
-    opts.orient === undefined ? [ORIENTS[0], ORIENTS[2]] : [ORIENTS[opts.orient % 4]];
+    opts.orient === undefined
+      ? [ORIENTS[0], ORIENTS[2]]
+      : [ORIENTS[opts.orient % 4]];
   const fits = (br: Bracket) => {
     const f = bracketFrame(br, others);
     // The grid is only a guide, not a floor: brackets may reach below it.
@@ -347,7 +356,10 @@ export function bracketAt(
     } else {
       // The cursor marks the middle of the flat leg.
       at = snap(point[ia] - o.sa * 15 - a.p[ia], step) + a.p[ia];
-      at = o.sa > 0 ? Math.min(Math.max(at, lo), hi - LEG) : Math.max(Math.min(at, hi), lo + LEG);
+      at =
+        o.sa > 0
+          ? Math.min(Math.max(at, lo), hi - LEG)
+          : Math.max(Math.min(at, hi), lo + LEG);
     }
     const br: Bracket = {
       kind: "bracket",
@@ -377,12 +389,17 @@ export function joinTouching(parts: Part[]) {
     const a = rail(parts, br.a),
       f = bracketFrame(br, parts);
     if (!a || !f) continue;
-    const j = joints(a, br.face, br.sign, { across: !!br.across, sa: br.sa }, parts, f.origin[ai(a.axis)]).find(
-      (j) => {
-        const g = bracketFrame(j, parts)!;
-        return g.origin.every((v, i) => Math.abs(v - f.origin[i]) < 0.1);
-      },
-    );
+    const j = joints(
+      a,
+      br.face,
+      br.sign,
+      { across: !!br.across, sa: br.sa },
+      parts,
+      f.origin[ai(a.axis)],
+    ).find((j) => {
+      const g = bracketFrame(j, parts)!;
+      return g.origin.every((v, i) => Math.abs(v - f.origin[i]) < 0.1);
+    });
     if (j) br.b = j.b;
   }
   return parts;
@@ -400,7 +417,8 @@ export function bracketCandidates(parts: Part[]) {
           for (const br of joints(a, face, sign, o, parts, a.p[ai(a.axis)])) {
             const f = bracketFrame(br, parts)!;
             if (!aboveFloor(f) || bracketInterference(br, parts)) continue;
-            if ([...existing, ...result].some((x) => sameSpot(x, br, parts))) continue;
+            if ([...existing, ...result].some((x) => sameSpot(x, br, parts)))
+              continue;
             result.push(br);
           }
     }
@@ -460,7 +478,9 @@ export function bill(project: Project): BillRow[] {
       ids: rs.map((p) => p.label).join(", "),
     });
   }
-  const brackets = project.parts.filter((p) => p.kind === "bracket") as Bracket[],
+  const brackets = project.parts.filter(
+      (p) => p.kind === "bracket",
+    ) as Bracket[],
     nuts = project.parts.filter((p) => p.kind === "nut");
   for (const stacked of [false, true]) {
     const group = brackets.filter(
@@ -683,7 +703,8 @@ export function exampleProject(): Project {
   return p;
 }
 export function parseProject(text: string): Project {
-  if (text.length > 5_000_000) throw new Error("Project file exceeds 5 MB.");
+  if (text.length > MAX_PROJECT_BYTES)
+    throw new Error("Project file exceeds 25 MB.");
   const p = JSON.parse(text);
   const finite = (n: unknown) =>
     typeof n === "number" && Number.isFinite(n) && Math.abs(n) <= 100000;
@@ -705,6 +726,7 @@ export function parseProject(text: string): Project {
   )
     throw new Error("This is not a supported gLOWframes project.");
   const ids = new Set();
+  validateReferences(p.references);
   for (const part of p.parts) {
     if (
       !part ||
@@ -734,7 +756,10 @@ export function parseProject(text: string): Project {
       )
         throw new Error("Invalid mounting point.");
     } else if (part.kind === "bracket") {
-      if (typeof part.a !== "string" || (part.b !== undefined && typeof part.b !== "string"))
+      if (
+        typeof part.a !== "string" ||
+        (part.b !== undefined && typeof part.b !== "string")
+      )
         throw new Error("Invalid bracket.");
     } else throw new Error("Unknown part type.");
   }
@@ -750,7 +775,9 @@ export function parseProject(text: string): Project {
     }
   }
   // Older files stored brackets as a pair of frames; convert them.
-  p.parts = (p.parts as any[]).filter((part) => !(part.kind === "bracket" && part.free));
+  p.parts = (p.parts as any[]).filter(
+    (part) => !(part.kind === "bracket" && part.free),
+  );
   for (const part of p.parts as any[]) {
     if (part.kind !== "bracket" || part.face !== undefined) continue;
     const a = rail(p.parts, part.a),
@@ -760,11 +787,34 @@ export function parseProject(text: string): Project {
     const ia = ai(a.axis),
       ib = ai(b.axis);
     const options = part.stack
-      ? [{ a: a.id, b: b.id, face: axes[3 - ia - ib], sign: part.sb, sa: part.sa, offset: round(b.p[ia] + part.sa * 10 - a.p[ia]) }]
+      ? [
+          {
+            a: a.id,
+            b: b.id,
+            face: axes[3 - ia - ib],
+            sign: part.sb,
+            sa: part.sa,
+            offset: round(b.p[ia] + part.sa * 10 - a.p[ia]),
+          },
+        ]
       : legacyJunction(a, b)
         ? [
-            { a: a.id, b: b.id, face: b.axis, sign: part.sb, sa: part.sa, offset: round(b.p[ia] + part.sa * 10 - a.p[ia]) },
-            { a: b.id, b: a.id, face: a.axis, sign: part.sa, sa: part.sb, offset: round(a.p[ib] + part.sb * 10 - b.p[ib]) },
+            {
+              a: a.id,
+              b: b.id,
+              face: b.axis,
+              sign: part.sb,
+              sa: part.sa,
+              offset: round(b.p[ia] + part.sa * 10 - a.p[ia]),
+            },
+            {
+              a: b.id,
+              b: a.id,
+              face: a.axis,
+              sign: part.sa,
+              sa: part.sb,
+              offset: round(a.p[ib] + part.sb * 10 - b.p[ib]),
+            },
           ]
         : [];
     const fit = options.find((o) => bracketOk({ ...part, ...o }, p.parts));
